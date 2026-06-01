@@ -4,23 +4,30 @@
 
 // ==========================================
 // 兼容 iOS 13+ 的 KeyWindow 获取函数
+// 使用 pragma 忽略 deprecated 警告，防止 -Werror 报错
 // ==========================================
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
 static UIWindow *getKeyWindow(void) {
     // iOS 13+ 多 Scene 架构
-    for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
-        if (scene.activationState == UISceneActivationStateForegroundActive) {
-            for (UIWindow *window in scene.windows) {
-                if (window.isKeyWindow) return window;
+    if (@available(iOS 13.0, *)) {
+        for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
+            if (scene.activationState == UISceneActivationStateForegroundActive) {
+                for (UIWindow *window in scene.windows) {
+                    if (window.isKeyWindow) return window;
+                }
             }
         }
     }
-    // 兜底方案
+    
+    // 兜底方案 (iOS 15 以下或无 Scene 的情况)
     NSArray<UIWindow *> *windows = [UIApplication sharedApplication].windows;
     for (UIWindow *window in windows) {
         if (window.isKeyWindow) return window;
     }
     return windows.firstObject;
 }
+#pragma clang diagnostic pop
 
 // ==========================================
 // 持久化存储 Key (记忆库)
@@ -129,9 +136,7 @@ static void performClick(UIView *view) {
         }
     }
     
-    // 方式4：最终兜底 - 模拟触摸事件
-    CGPoint center = CGPointMake(view.bounds.size.width / 2.0, view.bounds.size.height / 2.0);
-    NSLog(@"[UniversalSkipper] ⚡️ 兜底方案，目标中心点: %@", NSStringFromCGPoint(center));
+    NSLog(@"[UniversalSkipper] ⚡️ 兜底方案，未找到可点击目标: %@", view);
 }
 
 // ==========================================
@@ -148,8 +153,8 @@ static void scanAndProcess(BOOL isLearningMode) {
     __block NSInteger highestScore = 0;
     __block BOOL clicked = NO;
     
-    // 递归遍历函数
-    void (^traverse)(UIView *) = ^(UIView *view) {
+    // 【修复】：必须使用 __block 修饰符，允许 Block 在内部递归调用自己
+    __block void (^traverse)(UIView *) = ^(UIView *view) {
         if (!view || view.isHidden || view.alpha < 0.1 || clicked) return;
         
         // 【执行模式】：精确匹配已学习的目标
