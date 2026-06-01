@@ -13,11 +13,14 @@
     // 无论 SDK 怎么隐藏，我们强制让它显示
     %orig(NO); 
     
+    // 将 self 转换为 UIButton 以访问 superview 属性
+    UIButton *btn = (UIButton *)self;
+    
     // 只要它一出现，立刻自动触发点击事件（模拟用户跳过）
     dispatch_async(dispatch_get_main_queue(), ^{
-        if (self.superview) {
+        if (btn.superview) {
             NSLog(@"[AdBlock] 🎯 CSJ Skip Button forced visible & auto-clicked!");
-            [self sendActionsForControlEvents:UIControlEventTouchUpInside];
+            [btn sendActionsForControlEvents:UIControlEventTouchUpInside];
         }
     });
 }
@@ -32,10 +35,12 @@
 %hook CSJNativeExpressSplashVideoAdView
 - (void)didMoveToWindow {
     %orig;
-    if (self.window) {
+    // 将 self 转换为 UIView 以访问 window 属性
+    UIView *view = (UIView *)self;
+    if (view.window) {
         NSLog(@"[AdBlock] Removing CSJ Video Splash Ad View");
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            [self removeFromSuperview];
+            [view removeFromSuperview];
         });
     }
 }
@@ -68,10 +73,12 @@
 %hook GDTSplashDLView
 - (void)didMoveToWindow {
     %orig;
-    if (self.window) {
+    // 将 self 转换为 UIView 以访问 window 属性
+    UIView *view = (UIView *)self;
+    if (view.window) {
         NSLog(@"[AdBlock] Removing GDTSplashDLView");
         dispatch_async(dispatch_get_main_queue(), ^{
-            [self removeFromSuperview];
+            [view removeFromSuperview];
         });
     }
 }
@@ -108,7 +115,7 @@
 // 4. 初始化：精准激活
 // ==========================================
 %ctor {
-    NSLog(@"[AdBlock] Tweak v4.0 loaded - Anti-Hide & Auto-Dismiss Mode");
+    NSLog(@"[AdBlock] Tweak v4.1 loaded - Anti-Hide & Auto-Dismiss Mode");
     
     // 动态加载类，确保 Hook 生效
     Class csjSkipClass = objc_getClass("CSJSkipButton");
