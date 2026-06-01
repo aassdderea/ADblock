@@ -131,7 +131,6 @@
 // 拦截 SDK 创建的独立全屏广告 Window，在广告关闭后清理
 %hook UIWindow
 - (void)makeKeyAndVisible {
-    NSString *rootVCClass = NSStringFromClass([self.rootViewController class]);
     // 注意：这里不再无脑 hidden=YES，而是让广告正常显示以便触发跳过
     // 只在广告 Window 失去焦点时，确保它被隐藏
     %orig;
@@ -158,7 +157,7 @@
 // 4. 初始化：精准激活
 // ==========================================
 %ctor {
-    NSLog(@"[AdBlock] Tweak v7.0 loaded - Instant Entry & Smooth Mode");
+    NSLog(@"[AdBlock] Tweak v7.1 loaded - Instant Entry & Smooth Mode (Fixed)");
     
     // 激活视频播放器拔管
     Class buPlayer = objc_getClass("BU_ZFPlayerView");
