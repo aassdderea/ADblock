@@ -90,11 +90,10 @@
 // ==========================================
 %group GDTHooks
 
-// 【核心】欺骗 GDT 的倒计时和展示时间
+// 【核心】欺骗 GDT 的倒计时和展示时间 (已修复重载冲突)
 %hook GDTSplashAd
 - (NSTimeInterval)fetchDelay { return 0.1; }
 - (NSTimeInterval)duration { return 0.1; }
-- (NSUInteger)duration { return 0; } // 兼容不同版本返回类型
 %end
 
 // 拦截 GDT 的倒计时视图，防止 UI 渲染开销
@@ -139,7 +138,7 @@
 // 4. 初始化：精准激活
 // ==========================================
 %ctor {
-    NSLog(@"[AdBlock] Tweak v8.0 loaded - Time Machine Mode (No Black Screen)");
+    NSLog(@"[AdBlock] Tweak v8.1 loaded - Time Machine Mode (Fixed Overload)");
     
     // 激活视频播放器拔管
     Class buPlayer = objc_getClass("BU_ZFPlayerView");
