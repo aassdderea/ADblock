@@ -3,20 +3,49 @@
 #import <objc/message.h>
 
 // ==========================================
+// 核心破甲：彻底瘫痪视频播放器 (解决卡顿的元凶)
+// ==========================================
+%group PlayerKillerHooks
+
+// 穿山甲视频播放器：直接替换为零大小的空视图
+%hook BU_ZFPlayerView
+- (instancetype)initWithFrame:(CGRect)frame {
+    UIView *dummyView = [[UIView alloc] initWithFrame:CGRectZero];
+    dummyView.hidden = YES;
+    dummyView.userInteractionEnabled = NO;
+    return (id)dummyView; 
+}
+- (void)layoutSubviews { %orig; ((UIView *)self).hidden = YES; ((UIView *)self).frame = CGRectZero; }
+%end
+
+// 广点通视频播放器：同样替换为空视图
+%hook GDTVideoPlayerView
+- (instancetype)initWithFrame:(CGRect)frame {
+    UIView *dummyView = [[UIView alloc] initWithFrame:CGRectZero];
+    dummyView.hidden = YES;
+    dummyView.userInteractionEnabled = NO;
+    return (id)dummyView;
+}
+- (void)layoutSubviews { %orig; ((UIView *)self).hidden = YES; ((UIView *)self).frame = CGRectZero; }
+%end
+
+// 穿山甲播放器控制层：强制隐藏
+%hook BU_ZFPlayerControlView
+- (void)layoutSubviews { %orig; ((UIView *)self).hidden = YES; ((UIView *)self).frame = CGRectZero; }
+%end
+
+%end // PlayerKillerHooks
+
+
+// ==========================================
 // 1. 穿山甲 (CSJ/BU) 破甲组：强制显示并点击隐藏按钮
 // ==========================================
 %group CSJHooks
 
-// 核心破甲：拦截 CSJSkipButton 的隐藏行为，强制让它显示并自动点击
 %hook CSJSkipButton
 - (void)setHidden:(BOOL)hidden {
-    // 无论 SDK 怎么隐藏，我们强制让它显示
-    %orig(NO); 
-    
-    // 将 self 转换为 UIButton 以访问 superview 属性
+    %orig(NO); // 强制显示
     UIButton *btn = (UIButton *)self;
-    
-    // 只要它一出现，立刻自动触发点击事件（模拟用户跳过）
     dispatch_async(dispatch_get_main_queue(), ^{
         if (btn.superview) {
             NSLog(@"[AdBlock] 🎯 CSJ Skip Button forced visible & auto-clicked!");
@@ -24,25 +53,15 @@
         }
     });
 }
-
-// 防御 SDK 修改 Alpha 值
-- (void)setAlpha:(CGFloat)alpha {
-    %orig(1.0); // 强制透明度为 1
-}
+- (void)setAlpha:(CGFloat)alpha { %orig(1.0); }
 %end
 
-// 拦截视频开屏广告视图，直接移除
+// 视频开屏广告视图：早期拦截，零开销
 %hook CSJNativeExpressSplashVideoAdView
-- (void)didMoveToWindow {
-    %orig;
-    // 将 self 转换为 UIView 以访问 window 属性
-    UIView *view = (UIView *)self;
-    if (view.window) {
-        NSLog(@"[AdBlock] Removing CSJ Video Splash Ad View");
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            [view removeFromSuperview];
-        });
-    }
+- (instancetype)initWithFrame:(CGRect)frame {
+    UIView *dummy = [[UIView alloc] initWithFrame:CGRectZero];
+    dummy.hidden = YES;
+    return (id)dummy;
 }
 %end
 
@@ -54,33 +73,20 @@
 // ==========================================
 %group GDTHooks
 
-// 核心破甲：GDT 是通过 present 弹出的，我们在它出现的瞬间直接 dismiss
 %hook GDTSplashViewController
 - (void)viewDidAppear:(BOOL)animated {
     %orig;
     NSLog(@"[AdBlock] 🎯 GDT Splash VC appeared, force dismissing instantly!");
-    // 无动画立刻关闭，完美触发 SDK 的正常关闭回调，不会卡 10 秒
     [self dismissViewControllerAnimated:NO completion:nil];
 }
-
-// 防御 SDK 阻止 dismiss
-- (BOOL)isBeingDismissed {
-    return YES; // 欺骗 SDK 让它以为自己正在被关闭
-}
+- (BOOL)isBeingDismissed { return YES; }
 %end
 
-// 移除 GDT 的底层视图
 %hook GDTSplashDLView
-- (void)didMoveToWindow {
-    %orig;
-    // 将 self 转换为 UIView 以访问 window 属性
-    UIView *view = (UIView *)self;
-    if (view.window) {
-        NSLog(@"[AdBlock] Removing GDTSplashDLView");
-        dispatch_async(dispatch_get_main_queue(), ^{
-            [view removeFromSuperview];
-        });
-    }
+- (instancetype)initWithFrame:(CGRect)frame {
+    UIView *dummy = [[UIView alloc] initWithFrame:CGRectZero];
+    dummy.hidden = YES;
+    return (id)dummy;
 }
 %end
 
@@ -88,18 +94,19 @@
 
 
 // ==========================================
-// 3. 通用防御组：清理全屏遮罩
+// 3. 通用防御组：清理全屏遮罩与流氓 Window
 // ==========================================
 %group UniversalHooks
 
 %hook UIWindow
 - (void)makeKeyAndVisible {
     NSString *rootVCClass = NSStringFromClass([self.rootViewController class]);
-    // 拦截 SDK 创建的独立全屏广告 Window
+    // 拦截 SDK 创建的独立全屏广告 Window，以及挂载到 SnapshotWindow 的行为
     if ([rootVCClass containsString:@"Splash"] || 
         [rootVCClass containsString:@"Ad"] ||
         [rootVCClass containsString:@"GDT"] ||
-        [rootVCClass containsString:@"CSJ"]) {
+        [rootVCClass containsString:@"CSJ"] ||
+        [NSStringFromClass([self class]) containsString:@"Snapshot"]) {
         NSLog(@"[AdBlock] Blocked suspicious Ad UIWindow: %@", rootVCClass);
         self.hidden = YES;
         return;
@@ -115,19 +122,35 @@
 // 4. 初始化：精准激活
 // ==========================================
 %ctor {
-    NSLog(@"[AdBlock] Tweak v4.1 loaded - Anti-Hide & Auto-Dismiss Mode");
+    NSLog(@"[AdBlock] Tweak v5.0 loaded - Zero Render Overhead Mode");
     
-    // 动态加载类，确保 Hook 生效
-    Class csjSkipClass = objc_getClass("CSJSkipButton");
-    if (csjSkipClass) {
-        NSLog(@"[AdBlock] Activating CSJ Anti-Hide hooks");
-        %init(CSJHooks, CSJSkipButton = csjSkipClass, CSJNativeExpressSplashVideoAdView = objc_getClass("CSJNativeExpressSplashVideoAdView"));
+    // 激活视频播放器杀手 (解决卡顿的核心)
+    Class buPlayer = objc_getClass("BU_ZFPlayerView");
+    Class gdtPlayer = objc_getClass("GDTVideoPlayerView");
+    Class buControl = objc_getClass("BU_ZFPlayerControlView");
+    if (buPlayer || gdtPlayer || buControl) {
+        %init(PlayerKillerHooks, 
+              BU_ZFPlayerView = buPlayer ?: [UIView class], 
+              GDTVideoPlayerView = gdtPlayer ?: [UIView class],
+              BU_ZFPlayerControlView = buControl ?: [UIView class]);
     }
     
+    // 激活 CSJ Hook
+    Class csjSkipClass = objc_getClass("CSJSkipButton");
+    Class csjVideoAd = objc_getClass("CSJNativeExpressSplashVideoAdView");
+    if (csjSkipClass || csjVideoAd) {
+        %init(CSJHooks, 
+              CSJSkipButton = csjSkipClass ?: [UIButton class], 
+              CSJNativeExpressSplashVideoAdView = csjVideoAd ?: [UIView class]);
+    }
+    
+    // 激活 GDT Hook
     Class gdtVCClass = objc_getClass("GDTSplashViewController");
-    if (gdtVCClass) {
-        NSLog(@"[AdBlock] Activating GDT Auto-Dismiss hooks");
-        %init(GDTHooks, GDTSplashViewController = gdtVCClass, GDTSplashDLView = objc_getClass("GDTSplashDLView"));
+    Class gdtDLView = objc_getClass("GDTSplashDLView");
+    if (gdtVCClass || gdtDLView) {
+        %init(GDTHooks, 
+              GDTSplashViewController = gdtVCClass ?: [UIViewController class], 
+              GDTSplashDLView = gdtDLView ?: [UIView class]);
     }
     
     %init(UniversalHooks);
