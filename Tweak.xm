@@ -126,18 +126,25 @@ static void resetAppStateForNewUser(void) {
     NSUserDefaults *appDefaults = [[NSUserDefaults alloc] initWithSuiteName:kAppDomain];
     
     // 1. 备份必须保留的核心数据 (防止掉登录)
-    // 根据你提供的 plist 分析，这些是维持登录和基础功能的关键 Key
-    NSDictionary *backup = @{
-        @"login_status": appDefaults[@"login_status"] ?: @"",
-        @"flutter.accessToken": appDefaults[@"flutter.accessToken"] ?: @"",
-        @"flutter.userId": appDefaults[@"flutter.userId"] ?: @"",
-        @"flutter.userIdOtherHalf": appDefaults[@"flutter.userIdOtherHalf"] ?: @"",
-        @"flutter.loveSpaceId": appDefaults[@"flutter.loveSpaceId"] ?: @"",
-        @"key_last_login_record": appDefaults[@"key_last_login_record"] ?: @"",
-        @"love_user_agreement_policy": appDefaults[@"love_user_agreement_policy"] ?: @"",
-        @"love_user_agreement_policy2": appDefaults[@"love_user_agreement_policy2"] ?: @"",
-        @"DEVICE_TOKEN_MANAGER_DEVICE_TOKEN_KEY": appDefaults[@"DEVICE_TOKEN_MANAGER_DEVICE_TOKEN_KEY"] ?: @""
-    };
+    NSMutableDictionary *backup = [NSMutableDictionary dictionary];
+    NSArray *keysToBackup = @[
+        @"login_status",
+        @"flutter.accessToken",
+        @"flutter.userId",
+        @"flutter.userIdOtherHalf",
+        @"flutter.loveSpaceId",
+        @"key_last_login_record",
+        @"love_user_agreement_policy",
+        @"love_user_agreement_policy2",
+        @"DEVICE_TOKEN_MANAGER_DEVICE_TOKEN_KEY"
+    ];
+    
+    for (NSString *key in keysToBackup) {
+        id value = [appDefaults objectForKey:key];
+        if (value) {
+            [backup setObject:value forKey:key];
+        }
+    }
     
     // 2. 物理清空 App 的 plist 字典 (降维打击，让 App 以为自己是刚安装的新用户)
     NSDictionary *currentDict = [appDefaults dictionaryRepresentation];
@@ -147,8 +154,8 @@ static void resetAppStateForNewUser(void) {
     
     // 3. 把备份的核心数据写回去
     for (NSString *key in backup) {
-        id value = backup[key];
-        if (value && ![value isEqual:@""]) {
+        id value = [backup objectForKey:key];
+        if (value) {
             [appDefaults setObject:value forKey:key];
         }
     }
