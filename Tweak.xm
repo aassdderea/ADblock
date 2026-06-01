@@ -2,13 +2,10 @@
 #import <objc/runtime.h>
 #import <objc/message.h>
 
-// ==========================================
-// 持久化存储 Key (记忆库)
-// ==========================================
 static NSString *const kIsLearnedKey       = @"UniversalSkipper_IsLearned";
 static NSString *const kLearnedClassKey    = @"UniversalSkipper_LearnedClass";
 static NSString *const kLearnedTextKey     = @"UniversalSkipper_LearnedText";
-static NSString *const kFakeNewUserKey     = @"UniversalSkipper_FakeNewUser"; // 伪装新用户开关
+static NSString *const kFakeNewUserKey     = @"UniversalSkipper_FakeNewUser";
 
 static BOOL isCapturing = NO;
 
@@ -59,6 +56,7 @@ static void performClickOnTarget(UIView *target) {
     if (!target) return;
     if ([target isKindOfClass:[UIControl class]]) {
         [(UIControl *)target sendActionsForControlEvents:UIControlEventTouchUpInside];
+        NSLog(@"[UniversalSkipper] ⚡️ 触发 UIControl");
         return;
     }
     for (UIGestureRecognizer *gesture in target.gestureRecognizers) {
@@ -67,11 +65,29 @@ static void performClickOnTarget(UIView *target) {
             ((MsgSendVoidSEL)objc_msgSend)(gesture, @selector(setState:), 3);
             typedef void (*MsgSendVoidEvent)(id, SEL, UIEvent *);
             ((MsgSendVoidEvent)objc_msgSend)(gesture, NSSelectorFromString(@"_recognize:"), [UIEvent new]);
+            NSLog(@"[UniversalSkipper] ⚡️ 触发手势");
             return;
         }
     }
+    // 兜底：模拟物理点击坐标
+    CGPoint center = target.center;
+    UITouch *touch = [[UITouch alloc] init];
+    [touch setValue:@(UITouchPhaseBegan) forKey:@"phase"];
+    [touch setValue:[NSValue valueWithCGPoint:center] forKey:@"location"];
+    UIEvent *event = [[UIEvent alloc] init];
+    [event setValue:[NSSet setWithObject:touch] forKey:@"touches"];
+    [target.window sendEvent:event];
+    
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        [touch setValue:@(UITouchPhaseEnded) forKey:@"phase"];
+        [target.window sendEvent:event];
+    });
+    NSLog(@"[UniversalSkipper] ⚡️ 模拟物理点击坐标");
 }
 
+// ==========================================
+// 核心升级：模糊匹配引擎
+// ==========================================
 static void autoSkipAd(void) {
     NSString *savedClass = [[NSUserDefaults standardUserDefaults] stringForKey:kLearnedClassKey];
     NSString *savedText = [[NSUserDefaults standardUserDefaults] stringForKey:kLearnedTextKey];
@@ -79,41 +95,53 @@ static void autoSkipAd(void) {
     
     NSArray<UIWindow *> *allWindows = getAllWindowsSorted();
     __block BOOL clicked = NO;
+    
     __weak void (^weakTraverse)(UIView *);
     void (^traverse)(UIView *) = ^(UIView *view) {
         if (!view || view.isHidden || view.alpha < 0.1 || clicked) return;
+        
         NSString *currentClass = NSStringFromClass([view class]);
-        if ([currentClass isEqualToString:savedClass]) {
-            NSString *currentText = extractTextFromView(view);
-            if (savedText.length == 0 || [currentText containsString:savedText] || [savedText containsString:currentText] || [currentText containsString:@"跳过"]) {
+        NSString *currentText = extractTextFromView(view);
+        
+        // 1. 类名模糊匹配：只要保存的类名包含当前类名，或者当前类名包含保存的类名（去掉内存地址后缀）
+        NSString *baseSavedClass = [[savedClass componentsSeparatedByString:@"_"] firstObject];
+        NSString *baseCurrentClass = [[currentClass componentsSeparatedByString:@"_"] firstObject];
+        BOOL classMatch = [currentClass isEqualToString:savedClass] || 
+                          [baseCurrentClass isEqualToString:baseSavedClass] ||
+                          [currentClass containsString:baseSavedClass] || 
+                          [savedClass containsString:baseCurrentClass];
+        
+        // 2. 文本匹配：包含“跳过”、“skip”、“关闭”等关键字
+        NSString *lowerText = [currentText lowercaseString];
+        BOOL textMatch = [lowerText containsString:@"跳过"] || 
+                         [lowerText containsString:@"skip"] || 
+                         [lowerText containsString:@"关闭"] ||
+                         (savedText.length > 0 && ([currentText containsString:savedText] || [savedText containsString:currentText]));
+        
+        // 3. 综合判断：类名匹配 且 (文本匹配 或 保存时就没有文本)
+        if (classMatch && (textMatch || savedText.length == 0 || currentText.length == 0)) {
+            // 确保不是普通的导航栏或 TabBar
+            if (![currentClass containsString:@"Navigation"] && ![currentClass containsString:@"TabBar"]) {
                 performClickOnTarget(view);
                 clicked = YES;
                 return;
             }
         }
+        
         if (weakTraverse) for (UIView *sub in view.subviews) weakTraverse(sub);
     };
     weakTraverse = traverse;
+    
     for (UIWindow *window in allWindows) { if (clicked) break; traverse(window); }
 }
 
-// ==========================================
-// 核心 Hook：拦截 App 读取偏好设置，伪装新用户
-// ==========================================
 %hook NSUserDefaults
 - (id)objectForKey:(NSString *)defaultName {
-    // 如果开启了伪装新用户功能
     if ([[NSUserDefaults standardUserDefaults] boolForKey:kFakeNewUserKey]) {
-        // 拦截 App 常见的“是否首次启动”判断 Key
-        // (这里列举了一些常见的，如果App用了别的，可以在日志里看)
         NSString *lowerKey = [defaultName lowercaseString];
-        if ([lowerKey containsString:@"firstlaunch"] || 
-            [lowerKey containsString:@"haslaunched"] || 
-            [lowerKey containsString:@"isfirst"] ||
-            [lowerKey containsString:@"newuser"] ||
-            [lowerKey containsString:@"guide"]) {
-            NSLog(@"[UniversalSkipper] 🎭 拦截到状态查询: %@ -> 伪装返回 nil (新用户)", defaultName);
-            return nil; // 返回 nil，让 App 以为是首次启动
+        if ([lowerKey containsString:@"firstlaunch"] || [lowerKey containsString:@"haslaunched"] || 
+            [lowerKey containsString:@"isfirst"] || [lowerKey containsString:@"newuser"] || [lowerKey containsString:@"guide"]) {
+            return nil;
         }
     }
     return %orig;
@@ -122,34 +150,26 @@ static void autoSkipAd(void) {
 
 %ctor {
     NSLog(@"[UniversalSkipper] 🚀 插件已加载！");
-    
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
     BOOL isLearned = [defaults boolForKey:kIsLearnedKey];
-    BOOL isFakeNewUser = [defaults boolForKey:kFakeNewUserKey];
     
-    // 默认开启伪装新用户功能 (如果没有设置过)
     if (![defaults objectForKey:kFakeNewUserKey]) {
         [defaults setBool:YES forKey:kFakeNewUserKey];
         [defaults synchronize];
-        isFakeNewUser = YES;
-    }
-    
-    if (isFakeNewUser) {
-        NSLog(@"[UniversalSkipper] 🎭 伪装新用户模式已开启，App 可能会以为你是第一次打开！");
     }
     
     if (isLearned) {
         NSLog(@"[UniversalSkipper] 🧠 记忆已存在，进入自动跳过模式");
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             __block NSInteger count = 0;
-            [NSTimer scheduledTimerWithTimeInterval:0.5 repeats:YES block:^(NSTimer *timer) {
+            [NSTimer scheduledTimerWithTimeInterval:0.3 repeats:YES block:^(NSTimer *timer) {
                 count++;
                 autoSkipAd();
-                if (count >= 16) [timer invalidate];
+                if (count >= 25) [timer invalidate]; // 扫描 7.5 秒
             }];
         });
     } else {
-        NSLog(@"[UniversalSkipper] 🎯 首次运行，等待用户手动点击跳过按钮...");
+        NSLog(@"[UniversalSkipper] 🎯 首次运行，等待用户手动点击...");
         isCapturing = YES;
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(15.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             isCapturing = NO;
@@ -190,7 +210,7 @@ static void autoSkipAd(void) {
                         if (vc) { topVC = vc; break; }
                     }
                     if (topVC) {
-                        NSString *msg = [NSString stringWithFormat:@"已锁定: %@\n特征: %@\n\n(已自动开启伪装新用户模式)", className, text.length > 0 ? text : @"(无)"];
+                        NSString *msg = [NSString stringWithFormat:@"已锁定: %@\n特征: %@\n\n(已开启模糊匹配与伪装新用户)", className, text.length > 0 ? text : @"(无)"];
                         UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"🎯 捕获成功" message:msg preferredStyle:UIAlertControllerStyleAlert];
                         [alert addAction:[UIAlertAction actionWithTitle:@"太棒了" style:UIAlertActionStyleDefault handler:nil]];
                         [topVC presentViewController:alert animated:YES completion:nil];
@@ -210,7 +230,7 @@ static void autoSkipAd(void) {
         [defaults removeObjectForKey:kIsLearnedKey];
         [defaults removeObjectForKey:kLearnedClassKey];
         [defaults removeObjectForKey:kLearnedTextKey];
-        [defaults setBool:YES forKey:kFakeNewUserKey]; // 摇一摇时保持伪装开启
+        [defaults setBool:YES forKey:kFakeNewUserKey];
         [defaults synchronize];
         
         UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"🧹 记忆已清除" message:@"已重置并开启伪装新用户模式。" preferredStyle:UIAlertControllerStyleAlert];
