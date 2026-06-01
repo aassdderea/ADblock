@@ -2,10 +2,16 @@
 #import <objc/runtime.h>
 #import <objc/message.h>
 
+// ==========================================
+// 核心升级 1：插件状态分离 (存到独立的文件中，防止被误杀)
+// ==========================================
+static NSString *const kPluginDomain       = @"com.universalskipper.welove520"; // 插件专属 Domain
 static NSString *const kIsLearnedKey       = @"UniversalSkipper_IsLearned";
 static NSString *const kLearnedClassKey    = @"UniversalSkipper_LearnedClass";
 static NSString *const kLearnedTextKey     = @"UniversalSkipper_LearnedText";
-static NSString *const kFakeNewUserKey     = @"UniversalSkipper_FakeNewUser";
+
+// App 原本的 Domain
+static NSString *const kAppDomain          = @"com.welove520.welove";
 
 static BOOL isCapturing = NO;
 
@@ -56,7 +62,6 @@ static void performClickOnTarget(UIView *target) {
     if (!target) return;
     if ([target isKindOfClass:[UIControl class]]) {
         [(UIControl *)target sendActionsForControlEvents:UIControlEventTouchUpInside];
-        NSLog(@"[UniversalSkipper] ⚡️ 触发 UIControl");
         return;
     }
     for (UIGestureRecognizer *gesture in target.gestureRecognizers) {
@@ -65,11 +70,10 @@ static void performClickOnTarget(UIView *target) {
             ((MsgSendVoidSEL)objc_msgSend)(gesture, @selector(setState:), 3);
             typedef void (*MsgSendVoidEvent)(id, SEL, UIEvent *);
             ((MsgSendVoidEvent)objc_msgSend)(gesture, NSSelectorFromString(@"_recognize:"), [UIEvent new]);
-            NSLog(@"[UniversalSkipper] ⚡️ 触发手势");
             return;
         }
     }
-    // 兜底：模拟物理点击坐标
+    // 兜底物理点击
     CGPoint center = target.center;
     UITouch *touch = [[UITouch alloc] init];
     [touch setValue:@(UITouchPhaseBegan) forKey:@"phase"];
@@ -77,95 +81,102 @@ static void performClickOnTarget(UIView *target) {
     UIEvent *event = [[UIEvent alloc] init];
     [event setValue:[NSSet setWithObject:touch] forKey:@"touches"];
     [target.window sendEvent:event];
-    
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         [touch setValue:@(UITouchPhaseEnded) forKey:@"phase"];
         [target.window sendEvent:event];
     });
-    NSLog(@"[UniversalSkipper] ⚡️ 模拟物理点击坐标");
 }
 
-// ==========================================
-// 核心升级：模糊匹配引擎
-// ==========================================
 static void autoSkipAd(void) {
-    NSString *savedClass = [[NSUserDefaults standardUserDefaults] stringForKey:kLearnedClassKey];
-    NSString *savedText = [[NSUserDefaults standardUserDefaults] stringForKey:kLearnedTextKey];
+    // 从独立的插件 Domain 读取记忆
+    NSUserDefaults *pluginDefaults = [[NSUserDefaults alloc] initWithSuiteName:kPluginDomain];
+    NSString *savedClass = [pluginDefaults stringForKey:kLearnedClassKey];
+    NSString *savedText = [pluginDefaults stringForKey:kLearnedTextKey];
     if (!savedClass) return;
     
     NSArray<UIWindow *> *allWindows = getAllWindowsSorted();
     __block BOOL clicked = NO;
-    
     __weak void (^weakTraverse)(UIView *);
     void (^traverse)(UIView *) = ^(UIView *view) {
         if (!view || view.isHidden || view.alpha < 0.1 || clicked) return;
-        
         NSString *currentClass = NSStringFromClass([view class]);
         NSString *currentText = extractTextFromView(view);
-        
-        // 1. 类名模糊匹配：只要保存的类名包含当前类名，或者当前类名包含保存的类名（去掉内存地址后缀）
         NSString *baseSavedClass = [[savedClass componentsSeparatedByString:@"_"] firstObject];
         NSString *baseCurrentClass = [[currentClass componentsSeparatedByString:@"_"] firstObject];
-        BOOL classMatch = [currentClass isEqualToString:savedClass] || 
-                          [baseCurrentClass isEqualToString:baseSavedClass] ||
-                          [currentClass containsString:baseSavedClass] || 
-                          [savedClass containsString:baseCurrentClass];
-        
-        // 2. 文本匹配：包含“跳过”、“skip”、“关闭”等关键字
+        BOOL classMatch = [currentClass isEqualToString:savedClass] || [baseCurrentClass isEqualToString:baseSavedClass] || [currentClass containsString:baseSavedClass] || [savedClass containsString:baseCurrentClass];
         NSString *lowerText = [currentText lowercaseString];
-        BOOL textMatch = [lowerText containsString:@"跳过"] || 
-                         [lowerText containsString:@"skip"] || 
-                         [lowerText containsString:@"关闭"] ||
-                         (savedText.length > 0 && ([currentText containsString:savedText] || [savedText containsString:currentText]));
-        
-        // 3. 综合判断：类名匹配 且 (文本匹配 或 保存时就没有文本)
+        BOOL textMatch = [lowerText containsString:@"跳过"] || [lowerText containsString:@"skip"] || [lowerText containsString:@"关闭"] || (savedText.length > 0 && ([currentText containsString:savedText] || [savedText containsString:currentText]));
         if (classMatch && (textMatch || savedText.length == 0 || currentText.length == 0)) {
-            // 确保不是普通的导航栏或 TabBar
             if (![currentClass containsString:@"Navigation"] && ![currentClass containsString:@"TabBar"]) {
                 performClickOnTarget(view);
                 clicked = YES;
                 return;
             }
         }
-        
         if (weakTraverse) for (UIView *sub in view.subviews) weakTraverse(sub);
     };
     weakTraverse = traverse;
-    
     for (UIWindow *window in allWindows) { if (clicked) break; traverse(window); }
 }
 
-%hook NSUserDefaults
-- (id)objectForKey:(NSString *)defaultName {
-    if ([[NSUserDefaults standardUserDefaults] boolForKey:kFakeNewUserKey]) {
-        NSString *lowerKey = [defaultName lowercaseString];
-        if ([lowerKey containsString:@"firstlaunch"] || [lowerKey containsString:@"haslaunched"] || 
-            [lowerKey containsString:@"isfirst"] || [lowerKey containsString:@"newuser"] || [lowerKey containsString:@"guide"]) {
-            return nil;
+// ==========================================
+// 核心升级 2：物理级状态重置 (在最早期执行)
+// ==========================================
+static void resetAppStateForNewUser(void) {
+    NSUserDefaults *appDefaults = [[NSUserDefaults alloc] initWithSuiteName:kAppDomain];
+    
+    // 1. 备份必须保留的核心数据 (防止掉登录)
+    // 根据你提供的 plist 分析，这些是维持登录和基础功能的关键 Key
+    NSDictionary *backup = @{
+        @"login_status": appDefaults[@"login_status"] ?: @"",
+        @"flutter.accessToken": appDefaults[@"flutter.accessToken"] ?: @"",
+        @"flutter.userId": appDefaults[@"flutter.userId"] ?: @"",
+        @"flutter.userIdOtherHalf": appDefaults[@"flutter.userIdOtherHalf"] ?: @"",
+        @"flutter.loveSpaceId": appDefaults[@"flutter.loveSpaceId"] ?: @"",
+        @"key_last_login_record": appDefaults[@"key_last_login_record"] ?: @"",
+        @"love_user_agreement_policy": appDefaults[@"love_user_agreement_policy"] ?: @"",
+        @"love_user_agreement_policy2": appDefaults[@"love_user_agreement_policy2"] ?: @"",
+        @"DEVICE_TOKEN_MANAGER_DEVICE_TOKEN_KEY": appDefaults[@"DEVICE_TOKEN_MANAGER_DEVICE_TOKEN_KEY"] ?: @""
+    };
+    
+    // 2. 物理清空 App 的 plist 字典 (降维打击，让 App 以为自己是刚安装的新用户)
+    NSDictionary *currentDict = [appDefaults dictionaryRepresentation];
+    for (NSString *key in currentDict.allKeys) {
+        [appDefaults removeObjectForKey:key];
+    }
+    
+    // 3. 把备份的核心数据写回去
+    for (NSString *key in backup) {
+        id value = backup[key];
+        if (value && ![value isEqual:@""]) {
+            [appDefaults setObject:value forKey:key];
         }
     }
-    return %orig;
+    
+    // 4. 强制同步到磁盘
+    [appDefaults synchronize];
+    
+    NSLog(@"[UniversalSkipper] 🧹 物理清空 App 状态完成，已伪装为新用户并保留登录状态！");
 }
-%end
 
 %ctor {
     NSLog(@"[UniversalSkipper] 🚀 插件已加载！");
-    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
-    BOOL isLearned = [defaults boolForKey:kIsLearnedKey];
     
-    if (![defaults objectForKey:kFakeNewUserKey]) {
-        [defaults setBool:YES forKey:kFakeNewUserKey];
-        [defaults synchronize];
-    }
+    // 【关键】在插件初始化的第一时间，立刻执行物理清空！
+    // 这比 Hook NSUserDefaults 要早且彻底得多
+    resetAppStateForNewUser();
+    
+    NSUserDefaults *pluginDefaults = [[NSUserDefaults alloc] initWithSuiteName:kPluginDomain];
+    BOOL isLearned = [pluginDefaults boolForKey:kIsLearnedKey];
     
     if (isLearned) {
-        NSLog(@"[UniversalSkipper] 🧠 记忆已存在，进入自动跳过模式");
+        NSLog(@"[UniversalSkipper] 🧠 记忆已存在，进入自动跳过模式 (双保险)");
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             __block NSInteger count = 0;
             [NSTimer scheduledTimerWithTimeInterval:0.3 repeats:YES block:^(NSTimer *timer) {
                 count++;
                 autoSkipAd();
-                if (count >= 25) [timer invalidate]; // 扫描 7.5 秒
+                if (count >= 25) [timer invalidate];
             }];
         });
     } else {
@@ -195,11 +206,14 @@ static void autoSkipAd(void) {
                 if ([className containsString:@"Navigation"] || [className containsString:@"TabBar"] || [realTarget isKindOfClass:[UILabel class]]) continue;
                 
                 NSString *text = extractTextFromView(realTarget);
-                NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
-                [defaults setBool:YES forKey:kIsLearnedKey];
-                [defaults setObject:className forKey:kLearnedClassKey];
-                [defaults setObject:text forKey:kLearnedTextKey];
-                [defaults synchronize];
+                
+                // 保存到独立的插件 Domain，不再污染 App 的 plist
+                NSUserDefaults *pluginDefaults = [[NSUserDefaults alloc] initWithSuiteName:kPluginDomain];
+                [pluginDefaults setBool:YES forKey:kIsLearnedKey];
+                [pluginDefaults setObject:className forKey:kLearnedClassKey];
+                [pluginDefaults setObject:text forKey:kLearnedTextKey];
+                [pluginDefaults synchronize];
+                
                 isCapturing = NO;
                 
                 dispatch_async(dispatch_get_main_queue(), ^{
@@ -210,7 +224,7 @@ static void autoSkipAd(void) {
                         if (vc) { topVC = vc; break; }
                     }
                     if (topVC) {
-                        NSString *msg = [NSString stringWithFormat:@"已锁定: %@\n特征: %@\n\n(已开启模糊匹配与伪装新用户)", className, text.length > 0 ? text : @"(无)"];
+                        NSString *msg = [NSString stringWithFormat:@"已锁定: %@\n特征: %@\n\n(已开启物理清空+状态分离)", className, text.length > 0 ? text : @"(无)"];
                         UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"🎯 捕获成功" message:msg preferredStyle:UIAlertControllerStyleAlert];
                         [alert addAction:[UIAlertAction actionWithTitle:@"太棒了" style:UIAlertActionStyleDefault handler:nil]];
                         [topVC presentViewController:alert animated:YES completion:nil];
@@ -226,14 +240,13 @@ static void autoSkipAd(void) {
 %hook UIWindow
 - (void)motionEnded:(UIEventSubtype)motion withEvent:(UIEvent *)event {
     if (motion == UIEventSubtypeMotionShake) {
-        NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
-        [defaults removeObjectForKey:kIsLearnedKey];
-        [defaults removeObjectForKey:kLearnedClassKey];
-        [defaults removeObjectForKey:kLearnedTextKey];
-        [defaults setBool:YES forKey:kFakeNewUserKey];
-        [defaults synchronize];
+        NSUserDefaults *pluginDefaults = [[NSUserDefaults alloc] initWithSuiteName:kPluginDomain];
+        [pluginDefaults removeObjectForKey:kIsLearnedKey];
+        [pluginDefaults removeObjectForKey:kLearnedClassKey];
+        [pluginDefaults removeObjectForKey:kLearnedTextKey];
+        [pluginDefaults synchronize];
         
-        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"🧹 记忆已清除" message:@"已重置并开启伪装新用户模式。" preferredStyle:UIAlertControllerStyleAlert];
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"🧹 记忆已清除" message:@"已重置插件记忆。" preferredStyle:UIAlertControllerStyleAlert];
         [alert addAction:[UIAlertAction actionWithTitle:@"好的" style:UIAlertActionStyleDefault handler:nil]];
         UIViewController *vc = self.rootViewController;
         while (vc.presentedViewController) vc = vc.presentedViewController;
