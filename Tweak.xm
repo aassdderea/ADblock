@@ -4,12 +4,10 @@
 
 // ==========================================
 // 兼容 iOS 13+ 的 KeyWindow 获取函数
-// 使用 pragma 忽略 deprecated 警告，防止 -Werror 报错
 // ==========================================
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
 static UIWindow *getKeyWindow(void) {
-    // iOS 13+ 多 Scene 架构
     if (@available(iOS 13.0, *)) {
         for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
             if (scene.activationState == UISceneActivationStateForegroundActive) {
@@ -19,8 +17,6 @@ static UIWindow *getKeyWindow(void) {
             }
         }
     }
-    
-    // 兜底方案 (iOS 15 以下或无 Scene 的情况)
     NSArray<UIWindow *> *windows = [UIApplication sharedApplication].windows;
     for (UIWindow *window in windows) {
         if (window.isKeyWindow) return window;
@@ -47,7 +43,6 @@ static NSInteger calculateSkipScore(UIView *view) {
     CGRect screenBounds = window.bounds;
     CGRect frame = [view convertRect:view.bounds toView:window];
     
-    // 1. 位置打分：通常在顶部 (y < 25%)，且偏左或偏右
     if (frame.origin.y < screenBounds.size.height * 0.25) {
         score += 20;
         if (frame.origin.x < screenBounds.size.width * 0.25 || 
@@ -56,13 +51,11 @@ static NSInteger calculateSkipScore(UIView *view) {
         }
     }
     
-    // 2. 尺寸打分：跳过按钮通常很小
     if (frame.size.width > 10 && frame.size.width < 150 && 
         frame.size.height > 10 && frame.size.height < 80) {
         score += 20;
     }
     
-    // 3. 文本打分 (核心权重)
     NSString *text = @"";
     if ([view isKindOfClass:[UILabel class]]) {
         text = ((UILabel *)view).text ?: @"";
@@ -76,14 +69,12 @@ static NSInteger calculateSkipScore(UIView *view) {
             [lowerText containsString:@"关闭"] || [lowerText containsString:@"close"]) {
             score += 100;
         }
-        // 匹配纯数字倒计时
         NSRegularExpression *regex = [NSRegularExpression regularExpressionWithPattern:@"\\d+" options:0 error:nil];
         if ([regex numberOfMatchesInString:text options:0 range:NSMakeRange(0, text.length)] > 0) {
             score += 40;
         }
     }
     
-    // 4. 类名打分
     NSString *className = NSStringFromClass([view class]);
     if ([className rangeOfString:@"Skip" options:NSCaseInsensitiveSearch].location != NSNotFound ||
         [className rangeOfString:@"Close" options:NSCaseInsensitiveSearch].location != NSNotFound ||
@@ -100,20 +91,17 @@ static NSInteger calculateSkipScore(UIView *view) {
 static void performClick(UIView *view) {
     if (!view) return;
     
-    // 方式1：UIControl 直接触发
     if ([view isKindOfClass:[UIControl class]]) {
         [(UIControl *)view sendActionsForControlEvents:UIControlEventTouchUpInside];
         NSLog(@"[UniversalSkipper] ⚡️ 自动点击了 UIControl: %@", view);
         return;
     }
     
-    // 方式2：触发手势识别器
     if (view.gestureRecognizers.count > 0) {
         for (UIGestureRecognizer *gesture in view.gestureRecognizers) {
             if ([gesture isKindOfClass:[UITapGestureRecognizer class]]) {
-                // 强转函数指针，修复 objc_msgSend 编译错误
                 typedef void (*MsgSendVoidSEL)(id, SEL, NSInteger);
-                ((MsgSendVoidSEL)objc_msgSend)(gesture, @selector(setState:), 3); // UIGestureRecognizerStateRecognized
+                ((MsgSendVoidSEL)objc_msgSend)(gesture, @selector(setState:), 3);
                 
                 typedef void (*MsgSendVoidEvent)(id, SEL, UIEvent *);
                 UIEvent *event = [UIEvent new];
@@ -125,7 +113,6 @@ static void performClick(UIView *view) {
         }
     }
     
-    // 方式3：向上冒泡找能响应的父视图
     UIResponder *responder = view;
     while (responder) {
         responder = [responder nextResponder];
@@ -153,11 +140,14 @@ static void scanAndProcess(BOOL isLearningMode) {
     __block NSInteger highestScore = 0;
     __block BOOL clicked = NO;
     
-    // 【修复】：必须使用 __block 修饰符，允许 Block 在内部递归调用自己
-    __block void (^traverse)(UIView *) = ^(UIView *view) {
+    // 【终极修复】：ARC 下的安全递归 Block 写法
+    // 1. 声明一个弱引用指针
+    __weak void (^weakTraverse)(UIView *);
+    
+    // 2. 实现强引用 Block
+    void (^traverse)(UIView *) = ^(UIView *view) {
         if (!view || view.isHidden || view.alpha < 0.1 || clicked) return;
         
-        // 【执行模式】：精确匹配已学习的目标
         if (!isLearningMode && savedClass) {
             NSString *currentClass = NSStringFromClass([view class]);
             if ([currentClass isEqualToString:savedClass]) {
@@ -173,7 +163,6 @@ static void scanAndProcess(BOOL isLearningMode) {
             }
         }
         
-        // 【学习模式】：计算得分
         if (isLearningMode) {
             NSInteger score = calculateSkipScore(view);
             if (score > highestScore && score >= 60) {
@@ -182,28 +171,32 @@ static void scanAndProcess(BOOL isLearningMode) {
             }
         }
         
-        for (UIView *subview in view.subviews) {
-            traverse(subview);
+        // 3. 在内部调用弱引用，彻底打破循环引用 (Retain Cycle)
+        if (weakTraverse) {
+            for (UIView *subview in view.subviews) {
+                weakTraverse(subview);
+            }
         }
     };
     
+    // 4. 将强引用赋值给弱引用
+    weakTraverse = traverse;
+    
+    // 5. 开始执行
     traverse(keyWindow);
     
-    // 学习模式下，找到了最佳候选者
     if (isLearningMode && bestCandidate) {
         NSString *className = NSStringFromClass([bestCandidate class]);
         NSString *text = @"";
         if ([bestCandidate isKindOfClass:[UILabel class]]) text = ((UILabel *)bestCandidate).text ?: @"";
         else if ([bestCandidate isKindOfClass:[UIButton class]]) text = [(UIButton *)bestCandidate currentTitle] ?: @"";
         
-        // 保存记忆
         NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
         [defaults setBool:YES forKey:kIsLearnedKey];
         [defaults setObject:className forKey:kLearnedClassKey];
         [defaults setObject:text forKey:kLearnedTextKey];
         [defaults synchronize];
         
-        // 弹窗通知用户
         dispatch_async(dispatch_get_main_queue(), ^{
             UIViewController *topVC = getKeyWindow().rootViewController;
             while (topVC.presentedViewController) topVC = topVC.presentedViewController;
@@ -236,7 +229,7 @@ static void scanAndProcess(BOOL isLearningMode) {
         __block NSInteger scanCount = 0;
         [NSTimer scheduledTimerWithTimeInterval:0.2 repeats:YES block:^(NSTimer * _Nonnull timer) {
             scanCount++;
-            BOOL learningMode = !isLearned && (scanCount <= 25); // 前5秒为学习窗口
+            BOOL learningMode = !isLearned && (scanCount <= 25);
             
             if (!isLearned && scanCount > 25) {
                 [timer invalidate];
