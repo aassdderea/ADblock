@@ -1,157 +1,86 @@
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
+#import <objc/message.h>
 
 // ==========================================
-// 核心配置：识别跳过按钮的“特征库”
+// 持久化存储 Key (记忆库)
 // ==========================================
-static NSString * const kSkipButtonRegex = @"(?i)^\\s*(跳过|skip|关闭|close|跳过\\s*\\d+|\\d+\\s*跳过|\\d+\\s*s|skip\\s*in\\s*\\d+)\\s*$";
-static const CGFloat kMaxButtonArea = 25000.0; 
-static const CGFloat kEdgeMarginRatio = 0.35; 
+static NSString *const kIsLearnedKey       = @"UniversalSkipper_IsLearned";
+static NSString *const kLearnedClassKey    = @"UniversalSkipper_LearnedClass";
+static NSString *const kLearnedTextKey     = @"UniversalSkipper_LearnedText";
+static NSString *const kLearnedParentKey   = @"UniversalSkipper_LearnedParent";
 
 // ==========================================
-// 核心逻辑：C 语言静态函数 (极速扫描)
+// 辅助函数：计算控件的“跳过嫌疑”得分
 // ==========================================
-static UIButton * findSkipButtonInView(UIView *view) {
-    if (![view isKindOfClass:[UIView class]]) return nil;
-    if (view.isHidden || view.alpha < 0.1) return nil;
+static NSInteger calculateSkipScore(UIView *view) {
+    NSInteger score = 0;
+    UIWindow *window = [UIApplication sharedApplication].keyWindow;
+    if (!window) return 0;
     
-    if ([view isKindOfClass:[UIButton class]] || [view isKindOfClass:UIControl.class]) {
-        UIButton *btn = (UIButton *)view;
-        
-        // 1. 检查尺寸
-        CGRect frame = btn.frame;
-        CGFloat area = frame.size.width * frame.size.height;
-        if (area > kMaxButtonArea || area < 100) goto check_subviews; 
-        
-        // 2. 检查位置
-        UIWindow *window = btn.window;
-        if (window) {
-            CGFloat screenW = window.bounds.size.width;
-            CGFloat screenH = window.bounds.size.height;
-            CGPoint center = btn.center;
-            CGPoint centerInWindow = [btn.superview convertPoint:center toView:window];
-            
-            BOOL isOnRightEdge = centerInWindow.x > screenW * (1.0 - kEdgeMarginRatio);
-            BOOL isOnLeftEdge = centerInWindow.x < screenW * kEdgeMarginRatio;
-            BOOL isOnTopEdge = centerInWindow.y < screenH * kEdgeMarginRatio;
-            BOOL isOnBottomEdge = centerInWindow.y > screenH * (1.0 - kEdgeMarginRatio);
-            
-            BOOL isOnEdge = (isOnRightEdge && (isOnTopEdge || isOnBottomEdge)) || 
-                            (isOnLeftEdge && isOnBottomEdge);
-            
-            if (isOnEdge) {
-                // 3. 检查文本
-                NSString *title = [btn titleForState:UIControlStateNormal];
-                if (!title) title = btn.titleLabel.text;
-                if (!title) title = btn.accessibilityLabel; 
-                
-                if (title && title.length > 0 && title.length < 15) {
-                    NSPredicate *predicate = [NSPredicate predicateWithFormat:@"SELF MATCHES %@", kSkipButtonRegex];
-                    if ([predicate evaluateWithObject:title]) {
-                        return btn;
-                    }
-                }
-            }
+    CGRect screenBounds = window.bounds;
+    CGRect frame = [view convertRect:view.bounds toView:window];
+    
+    // 1. 位置打分：通常在顶部 (y < 20%)，且偏左或偏右 (x < 20% 或 x > 80%)
+    if (frame.origin.y < screenBounds.size.height * 0.25) {
+        score += 20;
+        if (frame.origin.x < screenBounds.size.width * 0.25 || 
+            frame.origin.x > screenBounds.size.width * 0.75) {
+            score += 30; // 边缘位置加分
         }
     }
     
-check_subviews:
-    for (UIView *subview in view.subviews) {
-        UIButton *found = findSkipButtonInView(subview);
-        if (found) return found;
+    // 2. 尺寸打分：跳过按钮通常很小 (宽<150, 高<80)
+    if (frame.size.width > 10 && frame.size.width < 150 && 
+        frame.size.height > 10 && frame.size.height < 80) {
+        score += 20;
     }
-    return nil;
+    
+    // 3. 文本打分 (核心权重)
+    NSString *text = @"";
+    if ([view isKindOfClass:[UILabel class]]) {
+        text = ((UILabel *)view).text ?: @"";
+    } else if ([view isKindOfClass:[UIButton class]]) {
+        text = [(UIButton *)view currentTitle] ?: @"";
+    }
+    
+    if (text.length > 0) {
+        NSString *lowerText = [text lowercaseString];
+        if ([lowerText containsString:@"跳过"] || [lowerText containsString:@"skip"] || 
+            [lowerText containsString:@"关闭"] || [lowerText containsString:@"close"]) {
+            score += 100; // 包含明确文字，直接高分
+        }
+        // 匹配纯数字倒计时 (如 "3", "5s", "跳过 3s")
+        NSRegularExpression *regex = [NSRegularExpression regularExpressionWithPattern:@"\\d+" options:0 error:nil];
+        if ([regex numberOfMatchesInString:text options:0 range:NSMakeRange(0, text.length)] > 0) {
+            score += 40;
+        }
+    }
+    
+    // 4. 类名打分
+    NSString *className = NSStringFromClass([view class]);
+    if ([className rangeOfString:@"Skip" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+        [className rangeOfString:@"Close" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+        [className rangeOfString:@"CountDown" options:NSCaseInsensitiveSearch].location != NSNotFound) {
+        score += 50;
+    }
+    
+    return score;
 }
 
 // ==========================================
-// 定时器控制逻辑 (彻底解决卡死闪退)
+// 核心执行函数：模拟点击
 // ==========================================
-static dispatch_source_t _skipTimer = nil;
-
-static void startSkipTimer() {
-    if (_skipTimer) return; // 防止重复启动
+static void performClick(UIView *view) {
+    if (!view) return;
     
-    _skipTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
-    
-    // 每 0.5 秒扫描一次
-    dispatch_source_set_timer(_skipTimer, dispatch_time(DISPATCH_TIME_NOW, 0.5 * NSEC_PER_SEC), 0.5 * NSEC_PER_SEC, 0.1 * NSEC_PER_SEC);
-    
-    __block int scanCount = 0;
-    dispatch_source_set_event_handler(_skipTimer, ^{
-        scanCount++;
-        
-        // 超过 10 次 (5秒) 还没找到，直接放弃并销毁定时器，绝不拖泥带水
-        if (scanCount > 10) {
-            NSLog(@"[UniversalSkipper] ⏱️ 扫描超时，停止扫描");
-            dispatch_source_cancel(_skipTimer);
-            _skipTimer = nil;
-            return;
-        }
-        
-        UIWindow *keyWindow = nil;
-        // 兼容 iOS 13+ 的多 Scene 架构
-        if (@available(iOS 13.0, *)) {
-            for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
-                if (scene.activationState == UISceneActivationStateForegroundActive) {
-                    for (UIWindow *w in scene.windows) {
-                        if (w.isKeyWindow) {
-                            keyWindow = w;
-                            break;
-                        }
-                    }
-                }
-                if (keyWindow) break;
-            }
-        }
-        
-        if (!keyWindow) {
-            #pragma clang diagnostic push
-            #pragma clang diagnostic ignored "-Wdeprecated-declarations"
-            keyWindow = [UIApplication sharedApplication].keyWindow;
-            #pragma clang diagnostic pop
-        }
-        
-        if (!keyWindow) return;
-        
-        // 过滤系统级 Window
-        if (keyWindow.windowLevel >= UIWindowLevelAlert - 1) return;
-        
-        UIButton *target = findSkipButtonInView(keyWindow);
-        if (target) {
-            NSLog(@"[UniversalSkipper] 🎯 发现并点击跳过按钮: '%@'", target.titleLabel.text ?: target.accessibilityLabel);
-            [target sendActionsForControlEvents:UIControlEventTouchUpInside];
-            
-            // 点击成功后，立刻销毁定时器
-            dispatch_source_cancel(_skipTimer);
-            _skipTimer = nil;
-        }
-    });
-    
-    dispatch_resume(_skipTimer);
-}
-
-// ==========================================
-// Hook 组：监听 App 启动完成
-// ==========================================
-%group UniversalSkipper
-
-%hook UIApplication
-- (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(NSDictionary *)launchOptions {
-    BOOL result = %orig;
-    // App 启动完成后，延迟 0.5 秒启动扫描定时器（给广告 SDK 一点渲染时间）
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        startSkipTimer();
-    });
-    return result;
-}
-%end
-
-%end // UniversalSkipper
-
-// ==========================================
-// 初始化
-// ==========================================
-%ctor {
-    NSLog(@"[UniversalSkipper] 🚀 Tweak loaded - 安全定时器版 (防闪退)");
-    %init(UniversalSkipper);
-}
+    // 尝试触发 UIControl 事件
+    if ([view isKindOfClass:[UIControl class]]) {
+        [(UIControl *)view sendActionsForControlEvents:UIControlEventTouchUpInside];
+        NSLog(@"[UniversalSkipper] ⚡️ 自动点击了 UIControl: %@", view);
+    } 
+    // 尝试触发 GestureRecognizer
+    else if (view.gestureRecognizers.count > 0) {
+        for (UIGestureRecognizer *gesture in view.gestureRecognizers) {
+            if ([gesture isKindOfClass:[UITapGestureRecognizer class]]) {
+                objc_msgSend(gesture, @selector(setState:)
