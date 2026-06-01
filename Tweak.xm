@@ -98,9 +98,16 @@
 - (void)viewDidAppear:(BOOL)animated {
     %orig;
     NSLog(@"[AdBlock] 🎯 GDT Splash VC dismissing safely!");
+    
+    // 将 self 转换为 UIViewController 以访问 presentingViewController 属性
+    UIViewController *vc = (UIViewController *)self;
+    
     // 使用安全的 dismiss 方式
-    if (self.presentingViewController) {
-        [self dismissViewControllerAnimated:NO completion:nil];
+    if (vc.presentingViewController) {
+        [vc dismissViewControllerAnimated:NO completion:nil];
+    } else {
+        // 如果没有 presentingViewController，尝试直接 dismiss
+        [vc dismissViewControllerAnimated:NO completion:nil];
     }
 }
 - (BOOL)isBeingDismissed { return YES; }
@@ -146,7 +153,7 @@
 // 4. 初始化：精准激活
 // ==========================================
 %ctor {
-    NSLog(@"[AdBlock] Tweak v6.0 loaded - Safe Paralysis Mode (No Crash)");
+    NSLog(@"[AdBlock] Tweak v6.1 loaded - Safe Paralysis Mode (No Crash)");
     
     // 激活视频播放器安全瘫痪
     Class buPlayer = objc_getClass("BU_ZFPlayerView");
