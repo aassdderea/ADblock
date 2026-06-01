@@ -3,15 +3,14 @@
 #import <objc/message.h>
 
 // ==========================================
-// 核心升级 1：插件状态分离 (存到独立的文件中，防止被误杀)
+// 持久化存储 Key (独立 Domain，防误删)
 // ==========================================
-static NSString *const kPluginDomain       = @"com.universalskipper.welove520"; // 插件专属 Domain
+static NSString *const kPluginDomain       = @"com.universalskipper.welove520";
 static NSString *const kIsLearnedKey       = @"UniversalSkipper_IsLearned";
-static NSString *const kLearnedClassKey    = @"UniversalSkipper_LearnedClass";
-static NSString *const kLearnedTextKey     = @"UniversalSkipper_LearnedText";
-
-// App 原本的 Domain
-static NSString *const kAppDomain          = @"com.welove520.welove";
+static NSString *const kLearnedXKey        = @"UniversalSkipper_X"; // 记忆 X 坐标
+static NSString *const kLearnedYKey        = @"UniversalSkipper_Y"; // 记忆 Y 坐标
+static NSString *const kScreenWidthKey     = @"UniversalSkipper_SW"; // 记忆屏幕宽
+static NSString *const kScreenHeightKey    = @"UniversalSkipper_SH"; // 记忆屏幕高
 
 static BOOL isCapturing = NO;
 
@@ -34,156 +33,103 @@ static NSArray<UIWindow *> *getAllWindowsSorted(void) {
 }
 #pragma clang diagnostic pop
 
-static UIView *findRealClickableTarget(UIView *hitView) {
-    UIResponder *responder = hitView;
-    while (responder) {
-        if ([responder isKindOfClass:[UIControl class]]) return (UIView *)responder;
-        if ([responder isKindOfClass:[UIView class]]) {
-            UIView *view = (UIView *)responder;
-            for (UIGestureRecognizer *gesture in view.gestureRecognizers) {
-                if ([gesture isKindOfClass:[UITapGestureRecognizer class]]) return view;
-            }
+// ==========================================
+// 核心升级 1：视觉反馈 (画红圈)
+// ==========================================
+static void showRedCircleAtPoint(CGPoint point) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIView *circle = [[UIView alloc] initWithFrame:CGRectMake(point.x - 25, point.y - 25, 50, 50)];
+        circle.layer.cornerRadius = 25;
+        circle.layer.borderWidth = 4;
+        circle.layer.borderColor = [UIColor redColor].CGColor;
+        circle.backgroundColor = [[UIColor redColor] colorWithAlphaComponent:0.3];
+        circle.userInteractionEnabled = NO;
+        
+        // 添加到最顶层的 Window
+        NSArray *windows = getAllWindowsSorted();
+        if (windows.count > 0) {
+            [windows.firstObject addSubview:circle];
         }
-        responder = [responder nextResponder];
-    }
-    return hitView;
-}
-
-static NSString *extractTextFromView(UIView *view) {
-    if ([view isKindOfClass:[UILabel class]]) return ((UILabel *)view).text ?: @"";
-    if ([view isKindOfClass:[UIButton class]]) return [(UIButton *)view currentTitle] ?: @"";
-    for (UIView *sub in view.subviews) {
-        if ([sub isKindOfClass:[UILabel class]]) return ((UILabel *)sub).text ?: @"";
-    }
-    return @"";
-}
-
-static void performClickOnTarget(UIView *target) {
-    if (!target) return;
-    if ([target isKindOfClass:[UIControl class]]) {
-        [(UIControl *)target sendActionsForControlEvents:UIControlEventTouchUpInside];
-        return;
-    }
-    for (UIGestureRecognizer *gesture in target.gestureRecognizers) {
-        if ([gesture isKindOfClass:[UITapGestureRecognizer class]]) {
-            typedef void (*MsgSendVoidSEL)(id, SEL, NSInteger);
-            ((MsgSendVoidSEL)objc_msgSend)(gesture, @selector(setState:), 3);
-            typedef void (*MsgSendVoidEvent)(id, SEL, UIEvent *);
-            ((MsgSendVoidEvent)objc_msgSend)(gesture, NSSelectorFromString(@"_recognize:"), [UIEvent new]);
-            return;
-        }
-    }
-    // 兜底物理点击
-    CGPoint center = target.center;
-    UITouch *touch = [[UITouch alloc] init];
-    [touch setValue:@(UITouchPhaseBegan) forKey:@"phase"];
-    [touch setValue:[NSValue valueWithCGPoint:center] forKey:@"location"];
-    UIEvent *event = [[UIEvent alloc] init];
-    [event setValue:[NSSet setWithObject:touch] forKey:@"touches"];
-    [target.window sendEvent:event];
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        [touch setValue:@(UITouchPhaseEnded) forKey:@"phase"];
-        [target.window sendEvent:event];
+        
+        // 1.5秒后淡出消失
+        [UIView animateWithDuration:0.5 delay:1.0 options:UIViewAnimationOptionCurveEaseOut animations:^{
+            circle.alpha = 0;
+        } completion:^(BOOL finished) {
+            [circle removeFromSuperview];
+        }];
     });
 }
 
-static void autoSkipAd(void) {
-    // 从独立的插件 Domain 读取记忆
-    NSUserDefaults *pluginDefaults = [[NSUserDefaults alloc] initWithSuiteName:kPluginDomain];
-    NSString *savedClass = [pluginDefaults stringForKey:kLearnedClassKey];
-    NSString *savedText = [pluginDefaults stringForKey:kLearnedTextKey];
-    if (!savedClass) return;
+// ==========================================
+// 核心升级 2：物理级坐标模拟点击 (无视任何控件类型)
+// ==========================================
+static void simulatePhysicalClick(CGPoint point, UIWindow *window) {
+    // 构造 UITouch 和 UIEvent
+    UITouch *touch = [[UITouch alloc] init];
+    [touch setValue:@(UITouchPhaseBegan) forKey:@"phase"];
+    [touch setValue:[NSValue valueWithCGPoint:point] forKey:@"location"];
+    [touch setValue:window forKey:@"window"];
     
-    NSArray<UIWindow *> *allWindows = getAllWindowsSorted();
-    __block BOOL clicked = NO;
-    __weak void (^weakTraverse)(UIView *);
-    void (^traverse)(UIView *) = ^(UIView *view) {
-        if (!view || view.isHidden || view.alpha < 0.1 || clicked) return;
-        NSString *currentClass = NSStringFromClass([view class]);
-        NSString *currentText = extractTextFromView(view);
-        NSString *baseSavedClass = [[savedClass componentsSeparatedByString:@"_"] firstObject];
-        NSString *baseCurrentClass = [[currentClass componentsSeparatedByString:@"_"] firstObject];
-        BOOL classMatch = [currentClass isEqualToString:savedClass] || [baseCurrentClass isEqualToString:baseSavedClass] || [currentClass containsString:baseSavedClass] || [savedClass containsString:baseCurrentClass];
-        NSString *lowerText = [currentText lowercaseString];
-        BOOL textMatch = [lowerText containsString:@"跳过"] || [lowerText containsString:@"skip"] || [lowerText containsString:@"关闭"] || (savedText.length > 0 && ([currentText containsString:savedText] || [savedText containsString:currentText]));
-        if (classMatch && (textMatch || savedText.length == 0 || currentText.length == 0)) {
-            if (![currentClass containsString:@"Navigation"] && ![currentClass containsString:@"TabBar"]) {
-                performClickOnTarget(view);
-                clicked = YES;
-                return;
-            }
-        }
-        if (weakTraverse) for (UIView *sub in view.subviews) weakTraverse(sub);
-    };
-    weakTraverse = traverse;
-    for (UIWindow *window in allWindows) { if (clicked) break; traverse(window); }
+    UIEvent *event = [[UIEvent alloc] init];
+    [event setValue:[NSSet setWithObject:touch] forKey:@"touches"];
+    
+    // 发送按下事件
+    [window sendEvent:event];
+    
+    // 0.05秒后发送抬起事件
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        [touch setValue:@(UITouchPhaseEnded) forKey:@"phase"];
+        [window sendEvent:event];
+        NSLog(@"[UniversalSkipper] ⚡️ 模拟物理点击坐标: (%.1f, %.1f)", point.x, point.y);
+    });
 }
 
 // ==========================================
-// 核心升级 2：物理级状态重置 (在最早期执行)
+// 执行模式：根据记忆的坐标自动点击
 // ==========================================
-static void resetAppStateForNewUser(void) {
-    NSUserDefaults *appDefaults = [[NSUserDefaults alloc] initWithSuiteName:kAppDomain];
+static void autoSkipAd(void) {
+    NSUserDefaults *pluginDefaults = [[NSUserDefaults alloc] initWithSuiteName:kPluginDomain];
+    BOOL isLearned = [pluginDefaults boolForKey:kIsLearnedKey];
+    if (!isLearned) return;
     
-    // 1. 备份必须保留的核心数据 (防止掉登录)
-    NSMutableDictionary *backup = [NSMutableDictionary dictionary];
-    NSArray *keysToBackup = @[
-        @"login_status",
-        @"flutter.accessToken",
-        @"flutter.userId",
-        @"flutter.userIdOtherHalf",
-        @"flutter.loveSpaceId",
-        @"key_last_login_record",
-        @"love_user_agreement_policy",
-        @"love_user_agreement_policy2",
-        @"DEVICE_TOKEN_MANAGER_DEVICE_TOKEN_KEY"
-    ];
+    CGFloat savedX = [pluginDefaults floatForKey:kLearnedXKey];
+    CGFloat savedY = [pluginDefaults floatForKey:kLearnedYKey];
+    CGFloat savedSW = [pluginDefaults floatForKey:kScreenWidthKey];
+    CGFloat savedSH = [pluginDefaults floatForKey:kScreenHeightKey];
     
-    for (NSString *key in keysToBackup) {
-        id value = [appDefaults objectForKey:key];
-        if (value) {
-            [backup setObject:value forKey:key];
-        }
+    if (savedSW <= 0 || savedSH <= 0) return;
+    
+    // 计算比例，适配不同分辨率的屏幕 (防止你换设备或者横竖屏)
+    CGFloat currentSW = [UIScreen mainScreen].bounds.size.width;
+    CGFloat currentSH = [UIScreen mainScreen].bounds.size.height;
+    
+    CGFloat targetX = (savedX / savedSW) * currentSW;
+    CGFloat targetY = (savedY / savedSH) * currentSH;
+    
+    CGPoint targetPoint = CGPointMake(targetX, targetY);
+    
+    // 获取最顶层的 Window 进行点击
+    NSArray *windows = getAllWindowsSorted();
+    if (windows.count > 0) {
+        simulatePhysicalClick(targetPoint, windows.firstObject);
     }
-    
-    // 2. 物理清空 App 的 plist 字典 (降维打击，让 App 以为自己是刚安装的新用户)
-    NSDictionary *currentDict = [appDefaults dictionaryRepresentation];
-    for (NSString *key in currentDict.allKeys) {
-        [appDefaults removeObjectForKey:key];
-    }
-    
-    // 3. 把备份的核心数据写回去
-    for (NSString *key in backup) {
-        id value = [backup objectForKey:key];
-        if (value) {
-            [appDefaults setObject:value forKey:key];
-        }
-    }
-    
-    // 4. 强制同步到磁盘
-    [appDefaults synchronize];
-    
-    NSLog(@"[UniversalSkipper] 🧹 物理清空 App 状态完成，已伪装为新用户并保留登录状态！");
 }
 
 %ctor {
     NSLog(@"[UniversalSkipper] 🚀 插件已加载！");
     
-    // 【关键】在插件初始化的第一时间，立刻执行物理清空！
-    // 这比 Hook NSUserDefaults 要早且彻底得多
-    resetAppStateForNewUser();
-    
     NSUserDefaults *pluginDefaults = [[NSUserDefaults alloc] initWithSuiteName:kPluginDomain];
     BOOL isLearned = [pluginDefaults boolForKey:kIsLearnedKey];
     
     if (isLearned) {
-        NSLog(@"[UniversalSkipper] 🧠 记忆已存在，进入自动跳过模式 (双保险)");
+        NSLog(@"[UniversalSkipper] 🧠 坐标记忆已存在，进入自动点击模式");
+        // 延迟 1 秒后开始高频点击，持续 5 秒
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             __block NSInteger count = 0;
             [NSTimer scheduledTimerWithTimeInterval:0.3 repeats:YES block:^(NSTimer *timer) {
                 count++;
                 autoSkipAd();
-                if (count >= 25) [timer invalidate];
+                if (count >= 16) [timer invalidate]; // 约 5 秒后停止
             }];
         });
     } else {
@@ -195,65 +141,78 @@ static void resetAppStateForNewUser(void) {
     }
 }
 
+// ==========================================
+// 核心 Hook：拦截全局触摸，记录坐标并画红圈
+// ==========================================
 %hook UIApplication
 - (void)sendEvent:(UIEvent *)event {
     %orig;
     if (!isCapturing || event.type != UIEventTypeTouches) return;
+    
     for (UITouch *touch in event.allTouches) {
         if (touch.phase == UITouchPhaseEnded) {
-            CGPoint point = [touch locationInView:nil];
-            UIView *hitView = nil;
-            for (UIWindow *window in getAllWindowsSorted()) {
-                hitView = [window hitTest:point withEvent:event];
-                if (hitView) break;
-            }
-            if (hitView) {
-                UIView *realTarget = findRealClickableTarget(hitView);
-                NSString *className = NSStringFromClass([realTarget class]);
-                if ([className containsString:@"Navigation"] || [className containsString:@"TabBar"] || [realTarget isKindOfClass:[UILabel class]]) continue;
-                
-                NSString *text = extractTextFromView(realTarget);
-                
-                // 保存到独立的插件 Domain，不再污染 App 的 plist
-                NSUserDefaults *pluginDefaults = [[NSUserDefaults alloc] initWithSuiteName:kPluginDomain];
-                [pluginDefaults setBool:YES forKey:kIsLearnedKey];
-                [pluginDefaults setObject:className forKey:kLearnedClassKey];
-                [pluginDefaults setObject:text forKey:kLearnedTextKey];
-                [pluginDefaults synchronize];
-                
-                isCapturing = NO;
-                
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    UIViewController *topVC = nil;
-                    for (UIWindow *w in getAllWindowsSorted()) {
-                        UIViewController *vc = w.rootViewController;
-                        while (vc.presentedViewController) vc = vc.presentedViewController;
-                        if (vc) { topVC = vc; break; }
-                    }
-                    if (topVC) {
-                        NSString *msg = [NSString stringWithFormat:@"已锁定: %@\n特征: %@\n\n(已开启物理清空+状态分离)", className, text.length > 0 ? text : @"(无)"];
-                        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"🎯 捕获成功" message:msg preferredStyle:UIAlertControllerStyleAlert];
-                        [alert addAction:[UIAlertAction actionWithTitle:@"太棒了" style:UIAlertActionStyleDefault handler:nil]];
-                        [topVC presentViewController:alert animated:YES completion:nil];
-                    }
-                });
-                break;
-            }
+            // 获取屏幕绝对坐标
+            CGPoint point = [touch locationInView:nil]; 
+            
+            // 【视觉反馈】立刻在点击位置画红圈
+            showRedCircleAtPoint(point);
+            
+            // 获取屏幕宽高
+            CGFloat sw = [UIScreen mainScreen].bounds.size.width;
+            CGFloat sh = [UIScreen mainScreen].bounds.size.height;
+            
+            // 过滤掉明显的边缘误触 (如底部 Home 条区域，顶部状态栏)
+            if (point.y < 40 || point.y > sh - 30) continue;
+            
+            NSLog(@"[UniversalSkipper] 🕵️ 捕获到点击坐标: (%.1f, %.1f)", point.x, point.y);
+            
+            // 保存坐标记忆
+            NSUserDefaults *pluginDefaults = [[NSUserDefaults alloc] initWithSuiteName:kPluginDomain];
+            [pluginDefaults setBool:YES forKey:kIsLearnedKey];
+            [pluginDefaults setFloat:point.x forKey:kLearnedXKey];
+            [pluginDefaults setFloat:point.y forKey:kLearnedYKey];
+            [pluginDefaults setFloat:sw forKey:kScreenWidthKey];
+            [pluginDefaults setFloat:sh forKey:kScreenHeightKey];
+            [pluginDefaults synchronize];
+            
+            isCapturing = NO; // 停止捕获
+            
+            // 弹窗通知
+            dispatch_async(dispatch_get_main_queue(), ^{
+                UIViewController *topVC = nil;
+                for (UIWindow *w in getAllWindowsSorted()) {
+                    UIViewController *vc = w.rootViewController;
+                    while (vc.presentedViewController) vc = vc.presentedViewController;
+                    if (vc) { topVC = vc; break; }
+                }
+                if (topVC) {
+                    NSString *msg = [NSString stringWithFormat:@"已锁定点击坐标:\nX: %.1f, Y: %.1f\n\n下次启动将自动模拟点击此位置！", point.x, point.y];
+                    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"🎯 坐标捕获成功" message:msg preferredStyle:UIAlertControllerStyleAlert];
+                    [alert addAction:[UIAlertAction actionWithTitle:@"太棒了" style:UIAlertActionStyleDefault handler:nil]];
+                    [topVC presentViewController:alert animated:YES completion:nil];
+                }
+            });
+            break;
         }
     }
 }
 %end
 
+// ==========================================
+// 隐藏功能：摇一摇清除记忆
+// ==========================================
 %hook UIWindow
 - (void)motionEnded:(UIEventSubtype)motion withEvent:(UIEvent *)event {
     if (motion == UIEventSubtypeMotionShake) {
         NSUserDefaults *pluginDefaults = [[NSUserDefaults alloc] initWithSuiteName:kPluginDomain];
         [pluginDefaults removeObjectForKey:kIsLearnedKey];
-        [pluginDefaults removeObjectForKey:kLearnedClassKey];
-        [pluginDefaults removeObjectForKey:kLearnedTextKey];
+        [pluginDefaults removeObjectForKey:kLearnedXKey];
+        [pluginDefaults removeObjectForKey:kLearnedYKey];
+        [pluginDefaults removeObjectForKey:kScreenWidthKey];
+        [pluginDefaults removeObjectForKey:kScreenHeightKey];
         [pluginDefaults synchronize];
         
-        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"🧹 记忆已清除" message:@"已重置插件记忆。" preferredStyle:UIAlertControllerStyleAlert];
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"🧹 记忆已清除" message:@"请重启App并手动点击一次跳过按钮重新学习。" preferredStyle:UIAlertControllerStyleAlert];
         [alert addAction:[UIAlertAction actionWithTitle:@"好的" style:UIAlertActionStyleDefault handler:nil]];
         UIViewController *vc = self.rootViewController;
         while (vc.presentedViewController) vc = vc.presentedViewController;
