@@ -1,142 +1,140 @@
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
-#import <objc/message.h>
 
 // ==========================================
-// 1. 穿山甲 (CSJ/BU) 破甲组：强制显示并点击隐藏按钮
+// 核心配置：识别跳过按钮的“特征库”
 // ==========================================
-%group CSJHooks
+// 1. 文本特征：支持中英文、大小写、带数字倒计时（如 "跳过 3" 或 "3s"）
+static NSString * const kSkipButtonRegex = @"(?i)^\\s*(跳过|skip|关闭|close|跳过\\s*\\d+|\\d+\\s*跳过|\\d+\\s*s|skip\\s*in\\s*\\d+)\\s*$";
 
-// 核心破甲：拦截 CSJSkipButton 的隐藏行为，强制让它显示并自动点击
-%hook CSJSkipButton
-- (void)setHidden:(BOOL)hidden {
-    // 无论 SDK 怎么隐藏，我们强制让它显示
-    %orig(NO); 
+// 2. 尺寸特征：跳过按钮通常不会太大（防误触全屏大按钮）
+static const CGFloat kMaxButtonArea = 25000.0; // 例如 100x250 或 150x150
+
+// 3. 位置特征：跳过按钮通常在屏幕边缘（右上角、右下角或左下角）
+static const CGFloat kEdgeMarginRatio = 0.35; // 按钮中心点必须在屏幕边缘 35% 的区域内
+
+// ==========================================
+// 核心逻辑：扫描并点击
+// ==========================================
+%group UniversalSkipper
+
+%hook UIView
+- (void)didMoveToWindow {
+    %orig;
     
-    // 将 self 转换为 UIButton 以访问 superview 属性
-    UIButton *btn = (UIButton *)self;
+    // 只有当视图被添加到 Window 时才触发扫描
+    UIWindow *window = self.window;
+    if (!window) return;
     
-    // 只要它一出现，立刻自动触发点击事件（模拟用户跳过）
-    dispatch_async(dispatch_get_main_queue(), ^{
-        if (btn.superview) {
-            NSLog(@"[AdBlock] 🎯 CSJ Skip Button forced visible & auto-clicked!");
-            [btn sendActionsForControlEvents:UIControlEventTouchUpInside];
-        }
+    // 过滤掉系统级 Window（如键盘、状态栏、Alert）
+    if (window.windowLevel >= UIWindowLevelAlert - 1) return;
+    
+    // 延迟 0.2 秒扫描。原因：SDK 渲染 UI 有先后顺序，等 0.2 秒确保按钮的 Text 和 Frame 已经设置完毕
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        [self _scanAndClickSkipButtonInWindow:window];
     });
 }
 
-// 防御 SDK 修改 Alpha 值
-- (void)setAlpha:(CGFloat)alpha {
-    %orig(1.0); // 强制透明度为 1
-}
-%end
+// 添加一个私有方法用于递归扫描
+%new
+- (void)_scanAndClickSkipButtonInWindow:(UIWindow *)window {
+    // 防重复点击标志
+    static NSDate *lastClickTime = nil;
+    if (lastClickTime && [[NSDate date] timeIntervalSinceDate:lastClickTime] < 1.0) {
+        return; // 1秒内不重复触发，防止死循环或疯狂点击
+    }
 
-// 拦截视频开屏广告视图，直接移除
-%hook CSJNativeExpressSplashVideoAdView
-- (void)didMoveToWindow {
-    %orig;
-    // 将 self 转换为 UIView 以访问 window 属性
-    UIView *view = (UIView *)self;
-    if (view.window) {
-        NSLog(@"[AdBlock] Removing CSJ Video Splash Ad View");
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            [view removeFromSuperview];
-        });
+    // 递归查找符合条件的按钮
+    UIButton *targetButton = [self _findSkipButtonInView:window];
+    
+    if (targetButton) {
+        NSLog(@"[UniversalSkipper] 🎯 发现跳过按钮: Class=%@, Text='%@', Frame=%@", 
+              NSStringFromClass([targetButton class]), 
+              [targetButton.titleLabel text] ?: @"(nil)", 
+              NSStringFromCGRect(targetButton.frame));
+        
+        // 执行物理点击
+        [targetButton sendActionsForControlEvents:UIControlEventTouchUpInside];
+        lastClickTime = [NSDate date];
     }
 }
-%end
 
-%end // CSJHooks
-
-
-// ==========================================
-// 2. 广点通 (GDT) 破甲组：秒杀 Present 弹出的控制器
-// ==========================================
-%group GDTHooks
-
-// 核心破甲：GDT 是通过 present 弹出的，我们在它出现的瞬间直接 dismiss
-%hook GDTSplashViewController
-- (void)viewDidAppear:(BOOL)animated {
-    %orig;
-    NSLog(@"[AdBlock] 🎯 GDT Splash VC appeared, force dismissing instantly!");
-    // 无动画立刻关闭，完美触发 SDK 的正常关闭回调，不会卡 10 秒
-    [self dismissViewControllerAnimated:NO completion:nil];
-}
-
-// 防御 SDK 阻止 dismiss
-- (BOOL)isBeingDismissed {
-    return YES; // 欺骗 SDK 让它以为自己正在被关闭
-}
-%end
-
-// 移除 GDT 的底层视图
-%hook GDTSplashDLView
-- (void)didMoveToWindow {
-    %orig;
-    // 将 self 转换为 UIView 以访问 window 属性
-    UIView *view = (UIView *)self;
-    if (view.window) {
-        NSLog(@"[AdBlock] Removing GDTSplashDLView");
-        dispatch_async(dispatch_get_main_queue(), ^{
-            [view removeFromSuperview];
-        });
+%new
+- (UIButton *)_findSkipButtonInView:(UIView *)view {
+    if (![view isKindOfClass:[UIView class]]) return nil;
+    
+    // 如果视图被隐藏或透明度极低，跳过
+    if (view.isHidden || view.alpha < 0.1) return nil;
+    
+    // 检查当前视图是否是目标 Button
+    if ([view isKindOfClass:[UIButton class]] || [view isKindOfClass:UIControl.class]) {
+        UIButton *btn = (UIButton *)view;
+        if ([self _isSkipButton:btn]) {
+            return btn;
+        }
     }
-}
-%end
-
-%end // GDTHooks
-
-
-// ==========================================
-// 3. 通用防御组：清理全屏遮罩
-// ==========================================
-%group UniversalHooks
-
-%hook UIWindow
-- (void)makeKeyAndVisible {
-    NSString *rootVCClass = NSStringFromClass([self.rootViewController class]);
-    // 拦截 SDK 创建的独立全屏广告 Window
-    if ([rootVCClass containsString:@"Splash"] || 
-        [rootVCClass containsString:@"Ad"] ||
-        [rootVCClass containsString:@"GDT"] ||
-        [rootVCClass containsString:@"CSJ"]) {
-        NSLog(@"[AdBlock] Blocked suspicious Ad UIWindow: %@", rootVCClass);
-        self.hidden = YES;
-        return;
+    
+    // 递归检查子视图
+    for (UIView *subview in view.subviews) {
+        UIButton *found = [self _findSkipButtonInView:subview];
+        if (found) return found;
     }
-    %orig;
+    
+    return nil;
+}
+
+%new
+- (BOOL)_isSkipButton:(UIButton *)btn {
+    // 1. 检查尺寸（防误触）
+    CGRect frame = btn.frame;
+    CGFloat area = frame.size.width * frame.size.height;
+    if (area > kMaxButtonArea || area < 100) return NO; // 太小或太大都不对
+    
+    // 2. 检查位置（必须在屏幕边缘）
+    UIWindow *window = btn.window;
+    if (!window) return NO;
+    
+    CGFloat screenW = window.bounds.size.width;
+    CGFloat screenH = window.bounds.size.height;
+    CGPoint center = btn.center;
+    
+    // 转换到 Window 坐标系
+    CGPoint centerInWindow = [btn.superview convertPoint:center toView:window];
+    
+    BOOL isOnRightEdge = centerInWindow.x > screenW * (1.0 - kEdgeMarginRatio);
+    BOOL isOnLeftEdge = centerInWindow.x < screenW * kEdgeMarginRatio;
+    BOOL isOnTopEdge = centerInWindow.y < screenH * kEdgeMarginRatio;
+    BOOL isOnBottomEdge = centerInWindow.y > screenH * (1.0 - kEdgeMarginRatio);
+    
+    // 绝大多数跳过按钮在右上角，少数在右下角或左下角
+    BOOL isOnEdge = (isOnRightEdge && (isOnTopEdge || isOnBottomEdge)) || 
+                    (isOnLeftEdge && isOnBottomEdge);
+    
+    if (!isOnEdge) return NO;
+    
+    // 3. 检查文本特征（核心识别）
+    NSString *title = [btn titleForState:UIControlStateNormal];
+    if (!title) title = btn.titleLabel.text;
+    if (!title) title = btn.accessibilityLabel; // 兼容某些无障碍标签
+    
+    if (title && title.length > 0 && title.length < 15) {
+        NSPredicate *predicate = [NSPredicate predicateWithFormat:@"SELF MATCHES %@", kSkipButtonRegex];
+        if ([predicate evaluateWithObject:title]) {
+            return YES;
+        }
+    }
+    
+    return NO;
 }
 %end
 
-%end // UniversalHooks
+%end // UniversalSkipper
 
 
 // ==========================================
-// 4. 初始化：精准激活 (已加固防崩溃兜底)
+// 初始化
 // ==========================================
 %ctor {
-    NSLog(@"[AdBlock] Tweak v4.1 loaded - Anti-Hide & Auto-Dismiss Mode (Stable)");
-    
-    // 动态加载类，确保 Hook 生效
-    Class csjSkipClass = objc_getClass("CSJSkipButton");
-    Class csjVideoClass = objc_getClass("CSJNativeExpressSplashVideoAdView");
-    if (csjSkipClass) {
-        NSLog(@"[AdBlock] Activating CSJ Anti-Hide hooks");
-        // 【加固】防止 csjVideoClass 为 nil 导致 Theos 崩溃，使用 UIView 兜底
-        %init(CSJHooks, 
-              CSJSkipButton = csjSkipClass, 
-              CSJNativeExpressSplashVideoAdView = csjVideoClass ?: [UIView class]);
-    }
-    
-    Class gdtVCClass = objc_getClass("GDTSplashViewController");
-    Class gdtDLClass = objc_getClass("GDTSplashDLView");
-    if (gdtVCClass) {
-        NSLog(@"[AdBlock] Activating GDT Auto-Dismiss hooks");
-        // 【加固】防止 gdtDLClass 为 nil 导致 Theos 崩溃，使用 UIView 兜底
-        %init(GDTHooks, 
-              GDTSplashViewController = gdtVCClass, 
-              GDTSplashDLView = gdtDLClass ?: [UIView class]);
-    }
-    
-    %init(UniversalHooks);
+    NSLog(@"[UniversalSkipper] 🚀 Tweak loaded - 全局开屏广告秒杀已激活");
+    %init(UniversalSkipper);
 }
