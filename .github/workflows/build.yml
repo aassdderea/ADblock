@@ -3,7 +3,7 @@ name: Build AdBlock Dylib
 on:
   push:
     branches: [ main ]
-  workflow_dispatch:  # 支持手动触发
+  workflow_dispatch:
 
 jobs:
   build:
@@ -12,19 +12,24 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Theos & Dependencies
+      - name: Install Theos with Explicit SDK
         run: |
-          bash -c "$(curl -fsSL https://raw.githubusercontent.com/theos/theos/master/bin/install-theos)"
-          brew install ldid dpkg xz
+          # 关键修复：设置 GITHUB_TOKEN 避免 API 限流 + 直接指定 SDK 版本
+          export GITHUB_TOKEN=${{ secrets.GITHUB_TOKEN }}
+          bash -c "$(curl -fsSL https://raw.githubusercontent.com/theos/theos/master/bin/install-theos)" -- --sdk=iphoneos16.5
+          
+          # 验证安装
+          ls ~/theos/sdks/
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Setup Orion (Lightweight Hook Framework)
+      - name: Setup Orion
         run: |
-          git clone --depth 1 https://github.com/theos/orion.git $THEOS/vendor/orion
-          echo "ORION=1" >> $GITHUB_ENV
+          # Orion 已在 install-theos 中作为 submodule 自动拉取，无需重复 clone
+          echo "THEOS=~/theos" >> $GITHUB_ENV
 
       - name: Build Dylib
         run: |
-          export THEOS=~/theos
           make package FINALPACKAGE=1
 
       - name: Upload Artifact
