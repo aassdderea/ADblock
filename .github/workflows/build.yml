@@ -2,42 +2,47 @@ name: Build AdBlock Dylib
 
 on:
   push:
-    branches: [ main ]
-  workflow_dispatch:
+    branches: [ main, master ]
+  workflow_dispatch: # 允许在 GitHub 网页端手动点击 "Run workflow" 触发
 
 jobs:
   build:
     runs-on: macos-14
     steps:
-      - name: Checkout
+      - name: Checkout Repository
         uses: actions/checkout@v4
+
+      - name: Install Dependencies
+        run: |
+          brew install ldid dpkg xz make
+          # 将 brew 安装的 GNU make 添加到 PATH，解决 Theos 编译慢的警告
+          echo "$(brew --prefix make)/libexec/gnubin" >> $GITHUB_PATH
 
       - name: Install Theos with Explicit SDK
         run: |
-          # 关键修复：设置 GITHUB_TOKEN 避免 API 限流 + 直接指定 SDK 版本
+          # 传入 GITHUB_TOKEN 提高 API 限额，并显式指定 SDK 版本防止下载失败
           export GITHUB_TOKEN=${{ secrets.GITHUB_TOKEN }}
           bash -c "$(curl -fsSL https://raw.githubusercontent.com/theos/theos/master/bin/install-theos)" -- --sdk=iphoneos16.5
-          
-          # 验证安装
-          ls ~/theos/sdks/
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Setup Orion
-        run: |
-          # Orion 已在 install-theos 中作为 submodule 自动拉取，无需重复 clone
-          echo "THEOS=~/theos" >> $GITHUB_ENV
-
-      - name: Build Dylib
+      - name: Build Dylib (TrollStore Optimized)
         run: |
           export THEOS=~/theos
-          # 只编译和 stage，不打包 deb
-          make FINALPACKAGE=1
+          # 使用 FINALPACKAGE=1 进行 Release 优化编译
+          # 使用 THEOS_PACKAGE_SCHEME=rootless 确保兼容现代 iOS 路径
+          make FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
 
-      - name: Upload Artifact
+      - name: Verify Build Output
+        run: |
+          echo "==> Checking build output..."
+          ls -lh .theos/obj/
+
+      - name: Upload Dylib Artifact
         uses: actions/upload-artifact@v4
         with:
           name: AdBlock-Dylib-${{ github.sha }}
-          # 👇 提取编译出的纯 dylib 文件
-          path: .theos/obj/arm64/AdBlock.dylib
+          # 直接提取编译出的纯净 dylib 文件，不打包 deb
+          path: .theos/obj/AdBlock.dylib
           retention-days: 7
+          if-no-files-found: error
