@@ -1,42 +1,80 @@
 #import <Foundation/Foundation.h>
 
-// 目标 App 的 Bundle ID (也就是 plist 的文件名)
-static NSString *const kAppDomain = @"com.welove520.welove";
+// ==========================================
+// 🎯 白名单配置区 (你想保留的登录核心 Key)
+// 如果以后发现掉登录了，抓包看看缺什么 Key，加到这里就行！
+// ==========================================
+static NSArray *const kKeysToKeep = @[
+    @"login_status",
+    @"flutter.accessToken",
+    @"flutter.userId",
+    @"token",
+    @"uid",
+    @"is_login",
+    @"user_info"
+];
 
 %ctor {
-    NSLog(@"[PlistCleaner] 🚀 插件开始执行清理...");
+    // 1. 获取当前注入 App 的 Bundle ID
+    NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
+    if (!bundleID || bundleID.length == 0) return;
+
+    // 保护系统进程
+    NSArray *blacklist = @[@"com.apple.springboard", @"com.apple.backboardd", @"com.apple.Preferences", @"com.apple.mobilesafari"];
+    if ([blacklist containsObject:bundleID]) return;
+
+    NSLog(@"[GhostLogin] 🚀 目标 App: %@, 开始执行【金蝉脱壳】...", bundleID);
+
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
     
     // ==========================================
-    // 第一重打击：调用系统 API 清空 Domain 缓存
+    // 第一步：【提取】备份核心登录 Key
     // ==========================================
-    // 这会告诉系统：“把 com.welove520.welove 的所有偏好设置全部作废”
-    [[NSUserDefaults standardUserDefaults] removePersistentDomainForName:kAppDomain];
-    
-    // ==========================================
-    // 第二重打击：物理删除 plist 文件 (降维打击)
-    // ==========================================
-    // 为了防止 iOS 系统的 cfprefsd 守护进程有缓存延迟，我们直接去文件系统里把文件删了
-    NSArray *paths = NSSearchPathForDirectoriesInDomains(NSLibraryDirectory, NSUserDomainMask, YES);
-    if (paths.count > 0) {
-        NSString *prefsDir = [paths.firstObject stringByAppendingPathComponent:@"Preferences"];
-        NSString *plistPath = [prefsDir stringByAppendingPathComponent:[NSString stringWithFormat:@"%@.plist", kAppDomain]];
-        
-        NSFileManager *fileManager = [NSFileManager defaultManager];
-        if ([fileManager fileExistsAtPath:plistPath]) {
-            NSError *error = nil;
-            [fileManager removeItemAtPath:plistPath error:&error];
-            if (!error) {
-                NSLog(@"[PlistCleaner] 🗑️ 物理删除成功: %@", plistPath);
-            } else {
-                NSLog(@"[PlistCleaner] ⚠️ 物理删除失败: %@", error.localizedDescription);
-            }
-        } else {
-            NSLog(@"[PlistCleaner] ℹ️ 文件不存在，无需删除");
+    NSMutableDictionary *backupData = [NSMutableDictionary dictionary];
+    for (NSString *key in kKeysToKeep) {
+        id value = [defaults objectForKey:key];
+        if (value) {
+            backupData[key] = value;
+            NSLog(@"[GhostLogin] 🔑 提取到关键数据: [%@] = %@", key, value);
         }
     }
     
-    // 强制同步一次，确保系统立刻刷新状态
-    [[NSUserDefaults standardUserDefaults] synchronize];
+    if (backupData.count == 0) {
+        NSLog(@"[GhostLogin] ℹ️ 未检测到任何登录 Key，说明当前是未登录状态，直接执行纯净清理。");
+    }
+
+    // ==========================================
+    // 第二步：【洗白】清空内存缓存与 Domain
+    // ==========================================
+    [defaults removePersistentDomainForName:bundleID];
+
+    // ==========================================
+    // 第三步：【降维】物理删除 plist 文件
+    // ==========================================
+    NSArray *paths = NSSearchPathForDirectoriesInDomains(NSLibraryDirectory, NSUserDomainMask, YES);
+    if (paths.count > 0) {
+        NSString *prefsDir = [paths.firstObject stringByAppendingPathComponent:@"Preferences"];
+        NSString *plistPath = [prefsDir stringByAppendingPathComponent:[NSString stringWithFormat:@"%@.plist", bundleID]];
+        
+        NSFileManager *fileManager = [NSFileManager defaultManager];
+        if ([fileManager fileExistsAtPath:plistPath]) {
+            [fileManager removeItemAtPath:plistPath error:nil];
+            NSLog(@"[GhostLogin] 🗑️ 物理删除旧 plist 成功!");
+        }
+    }
+
+    // ==========================================
+    // 第四步：【还魂】将备份的登录 Key 写回并刷盘
+    // ==========================================
+    if (backupData.count > 0) {
+        for (NSString *key in backupData) {
+            [defaults setObject:backupData[key] forKey:key];
+        }
+        NSLog(@"[GhostLogin] 💉 已将 %lu 个登录 Key 写回内存!", (unsigned long)backupData.count);
+    }
     
-    NSLog(@"[PlistCleaner] ✅ 清理完成！App 将以为自己是第一次安装。");
+    // 强制同步，让系统立刻生成一份只包含登录信息的“干净” plist 文件
+    [defaults synchronize];
+    
+    NSLog(@"[GhostLogin] ✅ 【金蝉脱壳】完成！App 现在以为自己是刚安装的新设备，但拥有老用户的登录态。");
 }
