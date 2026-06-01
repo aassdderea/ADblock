@@ -123,7 +123,14 @@
             
             NSLog(@"[AdBlock] 🛡️ Ad Window hidden, force waking up App main windows!");
             dispatch_async(dispatch_get_main_queue(), ^{
-                for (UIWindow *w in [UIApplication sharedApplication].windows) {
+                
+                // 【修复】使用 pragma 忽略 iOS 15.0 的废弃警告，确保编译通过
+                #pragma clang diagnostic push
+                #pragma clang diagnostic ignored "-Wdeprecated-declarations"
+                NSArray<UIWindow *> *allWindows = [UIApplication sharedApplication].windows;
+                #pragma clang diagnostic pop
+                
+                for (UIWindow *w in allWindows) {
                     NSString *wRootClass = NSStringFromClass([w.rootViewController class]);
                     // 找到 App 的主界面 Window (LoveTabBarViewController / LaunchUserInfoViewController)
                     if (w != self && wRootClass && 
@@ -155,7 +162,7 @@
 // 4. 初始化：精准激活
 // ==========================================
 %ctor {
-    NSLog(@"[AdBlock] Tweak v9.0 loaded - Physical Skip & Force Wakeup (No Black Screen)");
+    NSLog(@"[AdBlock] Tweak v9.1 loaded - Physical Skip & Force Wakeup (Fixed Deprecated Warning)");
     
     // 激活视频播放器拔管
     Class buPlayer = objc_getClass("BU_ZFPlayerView");
