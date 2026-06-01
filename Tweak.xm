@@ -87,7 +87,7 @@
 // 如果 SDK 创建了一个新的全屏 Window 来放广告，我们把它隐藏
 %hook UIWindow
 - (void)makeKeyAndVisible {
-    // 检查 window 的 rootViewController 是否是广告相关的
+    // 检查 window 的 rootViewController 是否是广告相关
     NSString *rootVCClass = NSStringFromClass([self.rootViewController class]);
     if ([rootVCClass containsString:@"Splash"] || 
         [rootVCClass containsString:@"Ad"] ||
