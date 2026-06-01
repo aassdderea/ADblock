@@ -30,11 +30,14 @@ jobs:
 
       - name: Build Dylib
         run: |
-          make package FINALPACKAGE=1
+          export THEOS=~/theos
+          # 只编译和 stage，不打包 deb
+          make FINALPACKAGE=1
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: AdBlock-Dylib-${{ github.sha }}
-          path: packages/*.deb
+          # 👇 提取编译出的纯 dylib 文件
+          path: .theos/obj/arm64/AdBlock.dylib
           retention-days: 7
