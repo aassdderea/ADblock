@@ -3,42 +3,59 @@
 #import <objc/message.h>
 
 // ==========================================
-// 核心破甲：彻底瘫痪视频播放器 (解决卡顿的元凶)
+// 核心修复：安全瘫痪视频播放器 (解决卡顿且不闪退)
 // ==========================================
 %group PlayerKillerHooks
 
-// 穿山甲视频播放器：直接替换为零大小的空视图
+// 穿山甲视频播放器：让它正常创建，但强制隐藏并剥夺尺寸
 %hook BU_ZFPlayerView
-- (instancetype)initWithFrame:(CGRect)frame {
-    UIView *dummyView = [[UIView alloc] initWithFrame:CGRectZero];
-    dummyView.hidden = YES;
-    dummyView.userInteractionEnabled = NO;
-    return (id)dummyView; 
+- (void)layoutSubviews {
+    %orig; // 必须调用原方法，防止 SDK 内部状态机崩溃
+    UIView *v = (UIView *)self;
+    if (!v.hidden || !CGRectEqualToRect(v.frame, CGRectZero)) {
+        v.hidden = YES;
+        v.frame = CGRectZero;
+        v.userInteractionEnabled = NO;
+    }
 }
-- (void)layoutSubviews { %orig; ((UIView *)self).hidden = YES; ((UIView *)self).frame = CGRectZero; }
+- (void)didMoveToWindow {
+    %orig;
+    ((UIView *)self).hidden = YES;
+}
 %end
 
-// 广点通视频播放器：同样替换为空视图
+// 广点通视频播放器：同样安全瘫痪
 %hook GDTVideoPlayerView
-- (instancetype)initWithFrame:(CGRect)frame {
-    UIView *dummyView = [[UIView alloc] initWithFrame:CGRectZero];
-    dummyView.hidden = YES;
-    dummyView.userInteractionEnabled = NO;
-    return (id)dummyView;
+- (void)layoutSubviews {
+    %orig;
+    UIView *v = (UIView *)self;
+    if (!v.hidden || !CGRectEqualToRect(v.frame, CGRectZero)) {
+        v.hidden = YES;
+        v.frame = CGRectZero;
+        v.userInteractionEnabled = NO;
+    }
 }
-- (void)layoutSubviews { %orig; ((UIView *)self).hidden = YES; ((UIView *)self).frame = CGRectZero; }
+- (void)didMoveToWindow {
+    %orig;
+    ((UIView *)self).hidden = YES;
+}
 %end
 
 // 穿山甲播放器控制层：强制隐藏
 %hook BU_ZFPlayerControlView
-- (void)layoutSubviews { %orig; ((UIView *)self).hidden = YES; ((UIView *)self).frame = CGRectZero; }
+- (void)layoutSubviews {
+    %orig;
+    UIView *v = (UIView *)self;
+    v.hidden = YES;
+    v.frame = CGRectZero;
+}
 %end
 
 %end // PlayerKillerHooks
 
 
 // ==========================================
-// 1. 穿山甲 (CSJ/BU) 破甲组：强制显示并点击隐藏按钮
+// 1. 穿山甲 (CSJ/BU) 破甲组：安全跳过
 // ==========================================
 %group CSJHooks
 
@@ -46,22 +63,26 @@
 - (void)setHidden:(BOOL)hidden {
     %orig(NO); // 强制显示
     UIButton *btn = (UIButton *)self;
-    dispatch_async(dispatch_get_main_queue(), ^{
-        if (btn.superview) {
-            NSLog(@"[AdBlock] 🎯 CSJ Skip Button forced visible & auto-clicked!");
-            [btn sendActionsForControlEvents:UIControlEventTouchUpInside];
-        }
-    });
+    // 增加 superview 和 window 检查，防止按钮被销毁后发送事件导致闪退
+    if (btn.superview && btn.window) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            // 再次检查，确保在异步执行时按钮依然存在
+            if (btn.superview && btn.window) {
+                NSLog(@"[AdBlock] 🎯 CSJ Skip Button auto-clicked safely!");
+                [btn sendActionsForControlEvents:UIControlEventTouchUpInside];
+            }
+        });
+    }
 }
 - (void)setAlpha:(CGFloat)alpha { %orig(1.0); }
 %end
 
-// 视频开屏广告视图：早期拦截，零开销
 %hook CSJNativeExpressSplashVideoAdView
-- (instancetype)initWithFrame:(CGRect)frame {
-    UIView *dummy = [[UIView alloc] initWithFrame:CGRectZero];
-    dummy.hidden = YES;
-    return (id)dummy;
+- (void)layoutSubviews {
+    %orig;
+    UIView *v = (UIView *)self;
+    v.hidden = YES;
+    v.frame = CGRectZero;
 }
 %end
 
@@ -69,24 +90,28 @@
 
 
 // ==========================================
-// 2. 广点通 (GDT) 破甲组：秒杀 Present 弹出的控制器
+// 2. 广点通 (GDT) 破甲组：安全 Dismiss
 // ==========================================
 %group GDTHooks
 
 %hook GDTSplashViewController
 - (void)viewDidAppear:(BOOL)animated {
     %orig;
-    NSLog(@"[AdBlock] 🎯 GDT Splash VC appeared, force dismissing instantly!");
-    [self dismissViewControllerAnimated:NO completion:nil];
+    NSLog(@"[AdBlock] 🎯 GDT Splash VC dismissing safely!");
+    // 使用安全的 dismiss 方式
+    if (self.presentingViewController) {
+        [self dismissViewControllerAnimated:NO completion:nil];
+    }
 }
 - (BOOL)isBeingDismissed { return YES; }
 %end
 
 %hook GDTSplashDLView
-- (instancetype)initWithFrame:(CGRect)frame {
-    UIView *dummy = [[UIView alloc] initWithFrame:CGRectZero];
-    dummy.hidden = YES;
-    return (id)dummy;
+- (void)layoutSubviews {
+    %orig;
+    UIView *v = (UIView *)self;
+    v.hidden = YES;
+    v.frame = CGRectZero;
 }
 %end
 
@@ -94,19 +119,18 @@
 
 
 // ==========================================
-// 3. 通用防御组：清理全屏遮罩与流氓 Window
+// 3. 通用防御组：清理全屏遮罩 (移除 Snapshot 误杀)
 // ==========================================
 %group UniversalHooks
 
 %hook UIWindow
 - (void)makeKeyAndVisible {
     NSString *rootVCClass = NSStringFromClass([self.rootViewController class]);
-    // 拦截 SDK 创建的独立全屏广告 Window，以及挂载到 SnapshotWindow 的行为
+    // 仅拦截明确的广告 Window，不再拦截 Snapshot
     if ([rootVCClass containsString:@"Splash"] || 
         [rootVCClass containsString:@"Ad"] ||
         [rootVCClass containsString:@"GDT"] ||
-        [rootVCClass containsString:@"CSJ"] ||
-        [NSStringFromClass([self class]) containsString:@"Snapshot"]) {
+        [rootVCClass containsString:@"CSJ"]) {
         NSLog(@"[AdBlock] Blocked suspicious Ad UIWindow: %@", rootVCClass);
         self.hidden = YES;
         return;
@@ -122,9 +146,9 @@
 // 4. 初始化：精准激活
 // ==========================================
 %ctor {
-    NSLog(@"[AdBlock] Tweak v5.0 loaded - Zero Render Overhead Mode");
+    NSLog(@"[AdBlock] Tweak v6.0 loaded - Safe Paralysis Mode (No Crash)");
     
-    // 激活视频播放器杀手 (解决卡顿的核心)
+    // 激活视频播放器安全瘫痪
     Class buPlayer = objc_getClass("BU_ZFPlayerView");
     Class gdtPlayer = objc_getClass("GDTVideoPlayerView");
     Class buControl = objc_getClass("BU_ZFPlayerControlView");
