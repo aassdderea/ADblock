@@ -16,7 +16,6 @@
 }
 - (void)didMoveToWindow {
     %orig;
-    // 尝试调用播放器的暂停/停止方法，防止后台解码消耗 CPU
     if ([self respondsToSelector:@selector(pause)]) {
         [self performSelector:@selector(pause)];
     }
@@ -45,23 +44,11 @@
 
 
 // ==========================================
-// 1. 穿山甲 (CSJ/BU) 秒进组：时光机模式
+// 1. 穿山甲 (CSJ/BU) 秒进组：纯物理点击
 // ==========================================
 %group CSJHooks
 
-// 【核心】欺骗倒计时管理器，让它以为时间已经到了
-%hook CSJSplashAdManager
-- (NSTimeInterval)splashAdDuration { return 0.1; }
-- (NSTimeInterval)duration { return 0.1; }
-- (NSTimeInterval)countdownTime { return 0; }
-%end
-
-// 针对可能存在的 Ad 实例拦截
-%hook BUSplashAd
-- (NSTimeInterval)duration { return 0.1; }
-%end
-
-// 强制显示跳过按钮并自动点击（双重保险）
+// 强制显示跳过按钮并自动点击（这是最安全的跳过，SDK 会正常触发关闭回调）
 %hook CSJSkipButton
 - (void)layoutSubviews {
     %orig;
@@ -80,27 +67,37 @@
     }
 }
 - (void)setHidden:(BOOL)hidden { %orig(NO); }
+- (void)setAlpha:(CGFloat)alpha { %orig(1.0); }
+%end
+
+// 隐藏倒计时数字，眼不见心不烦
+%hook CSJCountdownView
+- (void)layoutSubviews {
+    %orig;
+    ((UIView *)self).hidden = YES;
+}
 %end
 
 %end // CSJHooks
 
 
 // ==========================================
-// 2. 广点通 (GDT) 秒进组：时光机模式
+// 2. 广点通 (GDT) 秒进组：物理跳过
 // ==========================================
 %group GDTHooks
 
-// 【核心】欺骗 GDT 的倒计时和展示时间 (已修复重载冲突)
-%hook GDTSplashAd
-- (NSTimeInterval)fetchDelay { return 0.1; }
-- (NSTimeInterval)duration { return 0.1; }
-%end
-
-// 拦截 GDT 的倒计时视图，防止 UI 渲染开销
-%hook GDTSplashCountdownView
-- (void)layoutSubviews {
+%hook GDTSplashViewController
+- (void)viewDidAppear:(BOOL)animated {
     %orig;
-    ((UIView *)self).hidden = YES;
+    NSLog(@"[AdBlock] 🎯 GDT Splash VC appeared, trying skipAction!");
+    
+    UIViewController *vc = (UIViewController *)self;
+    // 尝试调用 GDT 内部的跳过方法
+    if ([vc respondsToSelector:@selector(skipAction)]) {
+        [vc performSelector:@selector(skipAction)];
+    } else if ([vc respondsToSelector:@selector(closeAd)]) {
+        [vc performSelector:@selector(closeAd)];
+    }
 }
 %end
 
@@ -108,25 +105,45 @@
 
 
 // ==========================================
-// 3. 通用防御组：安全放行与清理
+// 3. 终极兜底：暴力唤醒主界面 (解决黑屏的核心)
 // ==========================================
 %group UniversalHooks
 
 %hook UIWindow
-- (void)makeKeyAndVisible {
-    %orig; // 必须放行，让 SDK 正常接管和交还 Window，防止黑屏
-}
-
-- (void)resignKeyWindow {
+- (void)setHidden:(BOOL)hidden {
     %orig;
-    // 当广告 Window 失去焦点（说明 SDK 已经走完正常流程准备关闭了），我们顺手清理
-    NSString *rootVCClass = NSStringFromClass([self.rootViewController class]);
-    if (rootVCClass && 
-       ([rootVCClass containsString:@"Splash"] || 
-        [rootVCClass containsString:@"Ad"] ||
-        [rootVCClass containsString:@"GDT"] ||
-        [rootVCClass containsString:@"CSJ"])) {
-        self.hidden = YES;
+    // 如果 SDK 试图隐藏广告 Window，我们顺势强制唤醒 App 的主 Window
+    if (hidden == YES) {
+        NSString *rootVCClass = NSStringFromClass([self.rootViewController class]);
+        if (rootVCClass && 
+           ([rootVCClass containsString:@"Splash"] || 
+            [rootVCClass containsString:@"Ad"] ||
+            [rootVCClass containsString:@"GDT"] ||
+            [rootVCClass containsString:@"CSJ"])) {
+            
+            NSLog(@"[AdBlock] 🛡️ Ad Window hidden, force waking up App main windows!");
+            dispatch_async(dispatch_get_main_queue(), ^{
+                for (UIWindow *w in [UIApplication sharedApplication].windows) {
+                    NSString *wRootClass = NSStringFromClass([w.rootViewController class]);
+                    // 找到 App 的主界面 Window (LoveTabBarViewController / LaunchUserInfoViewController)
+                    if (w != self && wRootClass && 
+                       ([wRootClass containsString:@"Love"] || 
+                        [wRootClass containsString:@"Launch"] ||
+                        [wRootClass containsString:@"Main"] ||
+                        [wRootClass containsString:@"TabBar"])) {
+                        
+                        w.hidden = NO; // 强制显示 Window
+                        [w makeKeyWindow];
+                        
+                        // 强制显示其内部的所有子视图 (破解 hidden=YES 死锁)
+                        for (UIView *sub in w.rootViewController.view.subviews) {
+                            sub.hidden = NO;
+                        }
+                        w.rootViewController.view.hidden = NO;
+                    }
+                }
+            });
+        }
     }
 }
 %end
@@ -138,7 +155,7 @@
 // 4. 初始化：精准激活
 // ==========================================
 %ctor {
-    NSLog(@"[AdBlock] Tweak v8.1 loaded - Time Machine Mode (Fixed Overload)");
+    NSLog(@"[AdBlock] Tweak v9.0 loaded - Physical Skip & Force Wakeup (No Black Screen)");
     
     // 激活视频播放器拔管
     Class buPlayer = objc_getClass("BU_ZFPlayerView");
@@ -149,24 +166,19 @@
               GDTVideoPlayerView = gdtPlayer ?: [UIView class]);
     }
     
-    // 激活 CSJ 时光机
+    // 激活 CSJ 物理跳过
     Class csjSkipClass = objc_getClass("CSJSkipButton");
-    Class csjManager = objc_getClass("CSJSplashAdManager");
-    Class buSplashAd = objc_getClass("BUSplashAd");
-    if (csjSkipClass || csjManager || buSplashAd) {
+    Class csjCountdown = objc_getClass("CSJCountdownView");
+    if (csjSkipClass) {
         %init(CSJHooks, 
-              CSJSkipButton = csjSkipClass ?: [UIButton class],
-              CSJSplashAdManager = csjManager ?: [NSObject class],
-              BUSplashAd = buSplashAd ?: [NSObject class]);
+              CSJSkipButton = csjSkipClass, 
+              CSJCountdownView = csjCountdown ?: [UIView class]);
     }
     
-    // 激活 GDT 时光机
-    Class gdtSplashAd = objc_getClass("GDTSplashAd");
-    Class gdtCountdown = objc_getClass("GDTSplashCountdownView");
-    if (gdtSplashAd || gdtCountdown) {
-        %init(GDTHooks, 
-              GDTSplashAd = gdtSplashAd ?: [NSObject class],
-              GDTSplashCountdownView = gdtCountdown ?: [UIView class]);
+    // 激活 GDT 物理跳过
+    Class gdtVCClass = objc_getClass("GDTSplashViewController");
+    if (gdtVCClass) {
+        %init(GDTHooks, GDTSplashViewController = gdtVCClass);
     }
     
     %init(UniversalHooks);
