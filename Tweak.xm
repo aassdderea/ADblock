@@ -1,6 +1,16 @@
-// Tweak.xm - 必须在最顶部导入这两个头文件
+// ==========================================
+// Tweak.xm - 完整版 AdBlocker
+// ==========================================
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
+
+// ==========================================
+// 🔥 加载验证（确认插件是否注入成功）
+// ==========================================
+%ctor {
+    NSLog(@"[AdBlocker] 🔥🔥🔥 插件已成功加载！BundleID: %@", [[NSBundle mainBundle] bundleIdentifier]);
+}
+
 // ==========================================
 // 🎯 增强版：多SDK兼容 + 自动监听 + 四层触发
 // ==========================================
@@ -134,6 +144,12 @@ static void forceTriggerSkip(UIView *skipView) {
 
 - (void)didMoveToWindow {
     %orig;
+    
+    // 🔍 临时调试探针（前5次调用打印，确认无误后请删除此行以防日志爆炸）
+    static int debugCount = 0;
+    if (debugCount++ < 5) {
+        NSLog(@"[AdBlocker] 🔍 didMoveToWindow 被调用: %@", NSStringFromClass([self class]));
+    }
     
     // 仅当视图被添加到窗口时检查
     if (self.window && isKnownSkipButton(self)) {
