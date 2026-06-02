@@ -1,5 +1,5 @@
 // ==========================================
-// Tweak.xm - 通用广告跳过雷达 (Documents日志版)
+// Tweak.xm - 通用广告跳过雷达 (GDT修复版)
 // ==========================================
 #import <UIKit/UIKit.h>
 #import <Foundation/Foundation.h>
@@ -14,169 +14,40 @@ static int g_scanCount = 0;
 static BOOL g_hasSkipped = NO;
 
 // ==========================================
-// 📁 动态获取 Documents 日志路径
-// ==========================================
-static NSString *getDiagLogPath() {
-    static NSString *path = nil;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
-        NSString *docDir = paths.firstObject;
-        path = [docDir stringByAppendingPathComponent:@"adblock_diag.log"];
-    });
-    return path;
-}
-
-// ==========================================
-// 📝 文件日志写入工具
-// ==========================================
-static void writeDiagLog(NSString *message) {
-    if (!message) return;
-    @try {
-        NSString *logPath = getDiagLogPath();
-        NSString *timestamp = [[NSDate date] description];
-        NSString *logEntry = [NSString stringWithFormat:@"[%@] %@\n", timestamp, message];
-        
-        NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:logPath];
-        if (!fh) {
-            [[NSFileManager defaultManager] createFileAtPath:logPath contents:nil attributes:nil];
-            fh = [NSFileHandle fileHandleForWritingAtPath:logPath];
-        }
-        [fh seekToEndOfFile];
-        [fh writeData:[logEntry dataUsingEncoding:NSUTF8StringEncoding]];
-        [fh closeFile];
-    } @catch (NSException *e) {
-        // 静默处理，避免影响主流程
-    }
-}
-
-// ==========================================
-// 🔬 深度交互诊断探针（仅分析，不点击）
-// ==========================================
-static void diagnoseSkipButton(UIView *skipView) {
-    if (!skipView) return;
-    
-    dispatch_async(dispatch_get_main_queue(), ^{
-        @try {
-            NSString *cls = NSStringFromClass([skipView class]);
-            CGRect frame = [skipView convertRect:skipView.bounds toView:nil];
-            
-            writeDiagLog(@"====== 开始诊断 ======");
-            writeDiagLog([NSString stringWithFormat:@"类名: %@", cls]);
-            writeDiagLog([NSString stringWithFormat:@"坐标: (%.0f, %.0f, %.0f, %.0f)", 
-                          frame.origin.x, frame.origin.y, frame.size.width, frame.size.height]);
-            writeDiagLog([NSString stringWithFormat:@"userInteractionEnabled: %d", skipView.userInteractionEnabled]);
-            writeDiagLog([NSString stringWithFormat:@"hidden: %d | alpha: %.2f", skipView.isHidden, skipView.alpha]);
-            writeDiagLog([NSString stringWithFormat:@"isAccessibilityElement: %d", skipView.isAccessibilityElement]);
-            writeDiagLog([NSString stringWithFormat:@"accessibilityTraits: %lu", (unsigned long)skipView.accessibilityTraits]);
-            writeDiagLog([NSString stringWithFormat:@"accessibilityLabel: %@", skipView.accessibilityLabel]);
-            writeDiagLog([NSString stringWithFormat:@"自身手势数量: %lu", (unsigned long)skipView.gestureRecognizers.count]);
-            
-            for (NSInteger i = 0; i < skipView.gestureRecognizers.count; i++) {
-                UIGestureRecognizer *g = skipView.gestureRecognizers[i];
-                writeDiagLog([NSString stringWithFormat:@"  手势[%ld]: %@ enabled=%d state=%ld", 
-                              (long)i, NSStringFromClass([g class]), g.isEnabled, (long)g.state]);
-            }
-            
-            UIView *parent = skipView.superview;
-            int depth = 1;
-            while (parent && depth <= 5) {
-                NSString *pCls = NSStringFromClass([parent class]);
-                writeDiagLog([NSString stringWithFormat:@"父级[%d]: %@ | userInteraction=%d | 手势数=%lu | isControl=%d", 
-                              depth, pCls, parent.userInteractionEnabled, 
-                              (unsigned long)parent.gestureRecognizers.count,
-                              [parent isKindOfClass:[UIControl class]]]);
-                
-                for (NSInteger i = 0; i < parent.gestureRecognizers.count; i++) {
-                    UIGestureRecognizer *g = parent.gestureRecognizers[i];
-                    writeDiagLog([NSString stringWithFormat:@"  父级[%d]手势[%ld]: %@ enabled=%d", 
-                                  depth, (long)i, NSStringFromClass([g class]), g.isEnabled]);
-                }
-                parent = parent.superview;
-                depth++;
-            }
-            
-            UIWindow *keyWindow = skipView.window;
-            if (!keyWindow) {
-                for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
-                    if ([scene isKindOfClass:[UIWindowScene class]]) {
-                        keyWindow = ((UIWindowScene *)scene).windows.firstObject;
-                        if (keyWindow) break;
-                    }
-                }
-            }
-            
-            if (keyWindow) {
-                CGPoint center = CGPointMake(CGRectGetMidX(frame), CGRectGetMidY(frame));
-                UIView *hitView = [keyWindow hitTest:center withEvent:nil];
-                NSString *hitCls = hitView ? NSStringFromClass([hitView class]) : @"nil";
-                BOOL isSelfOrChild = [skipView isDescendantOfView:hitView] || [hitView isDescendantOfView:skipView] || hitView == skipView;
-                
-                writeDiagLog([NSString stringWithFormat:@"hitTest 结果: %@ | 与目标关联: %d", hitCls, isSelfOrChild]);
-                
-                if (hitView && hitView != skipView && !isSelfOrChild) {
-                    writeDiagLog(@"⚠️ hitTest 命中了完全不同的视图！这可能是跳过失败的根本原因");
-                    writeDiagLog([NSString stringWithFormat:@"hitView userInteraction=%d | 手势数=%lu | isControl=%d", 
-                                  hitView.userInteractionEnabled, 
-                                  (unsigned long)hitView.gestureRecognizers.count,
-                                  [hitView isKindOfClass:[UIControl class]]]);
-                }
-            } else {
-                writeDiagLog(@"⚠️ 无法获取 keyWindow，hitTest 跳过");
-            }
-            
-            writeDiagLog(@"====== 诊断结束 ======\n");
-            
-        } @catch (NSException *e) {
-            writeDiagLog([NSString stringWithFormat:@"❌ 诊断异常: %@", e]);
-        }
-    });
-}
-
-// ==========================================
-// 🎯 四层强制触发引擎
+// 🎯 四层强制触发引擎（已修复GDT私有手势）
 // ==========================================
 static void forceTriggerSkip(UIView *skipView) {
     if (!skipView || ![skipView isKindOfClass:[UIView class]]) return;
     
     dispatch_async(dispatch_get_main_queue(), ^{
         @try {
-            NSString *className = NSStringFromClass([skipView class]);
-            writeDiagLog([NSString stringWithFormat:@"🚀 开始强制跳过: %@", className]);
-            
             // 1. UIControl 事件模拟
             if ([skipView isKindOfClass:[UIControl class]]) {
                 [(UIControl *)skipView sendActionsForControlEvents:UIControlEventTouchDown];
                 [(UIControl *)skipView sendActionsForControlEvents:UIControlEventTouchUpInside];
-                writeDiagLog(@"✅ 触发自身 UIControl");
                 return;
             }
             
             // 2. 无障碍激活
             if ([skipView respondsToSelector:@selector(accessibilityActivate)]) {
-                BOOL result = [skipView accessibilityActivate];
-                writeDiagLog([NSString stringWithFormat:@"✅ accessibilityActivate 结果: %d", result]);
-                if (result) return;
+                if ([skipView accessibilityActivate]) return;
             }
             
-            // 3. 向上遍历父视图寻找手势/UIControl
+            // 3. ⭐ 核心修复：向上遍历，触发任意手势（不再限制UITapGestureRecognizer）
             UIView *targetView = skipView;
-            int maxDepth = 5;
+            int maxDepth = 8; // GDT层级较深，扩大到8层
             while (targetView && maxDepth-- > 0) {
+                // 优先尝试触发父视图上的所有手势
                 for (UIGestureRecognizer *gesture in targetView.gestureRecognizers) {
-                    if ([gesture isKindOfClass:[UITapGestureRecognizer class]]) {
+                    if (gesture.isEnabled) {
                         [gesture setValue:@(UIGestureRecognizerStateEnded) forKey:@"state"];
-                        writeDiagLog([NSString stringWithFormat:@"✅ 成功触发手势: %@ on %@", 
-                                      NSStringFromClass([gesture class]), 
-                                      NSStringFromClass([targetView class])]);
                         return;
                     }
                 }
                 
+                // 兜底：如果父视图是UIControl
                 if ([targetView isKindOfClass:[UIControl class]] && targetView != skipView) {
                     [(UIControl *)targetView sendActionsForControlEvents:UIControlEventTouchUpInside];
-                    writeDiagLog([NSString stringWithFormat:@"✅ 成功触发父级 UIControl: %@", 
-                                  NSStringFromClass([targetView class])]);
                     return;
                 }
                 
@@ -199,29 +70,22 @@ static void forceTriggerSkip(UIView *skipView) {
             
             if (keyWindow) {
                 UIView *realHitView = [keyWindow hitTest:centerPoint withEvent:nil];
-                if (realHitView && realHitView != keyWindow && realHitView != skipView) {
-                    writeDiagLog([NSString stringWithFormat:@"🎯 hitTest 命中真实视图: %@", 
-                                  NSStringFromClass([realHitView class])]);
-                    
+                if (realHitView && realHitView != keyWindow) {
                     if ([realHitView isKindOfClass:[UIControl class]]) {
                         [(UIControl *)realHitView sendActionsForControlEvents:UIControlEventTouchUpInside];
                     } else {
                         for (UIGestureRecognizer *g in realHitView.gestureRecognizers) {
-                            if ([g isKindOfClass:[UITapGestureRecognizer class]]) {
+                            if (g.isEnabled) {
                                 [g setValue:@(UIGestureRecognizerStateEnded) forKey:@"state"];
-                                writeDiagLog([NSString stringWithFormat:@"✅ hitTest 触发了手势: %@", NSStringFromClass([g class])]);
                                 break;
                             }
                         }
                     }
-                    return;
                 }
             }
             
-            writeDiagLog([NSString stringWithFormat:@"⚠️ 所有触发方式均未成功: %@", className]);
-            
         } @catch (NSException *e) {
-            writeDiagLog([NSString stringWithFormat:@"❌ 跳过异常: %@", e]);
+            // 静默处理
         }
     });
 }
@@ -284,7 +148,7 @@ static void ensureOverlayOnTop() {
 }
 
 // ==========================================
-// 深度雷达扫描（发现 -> 诊断 -> 触发）
+// 深度雷达扫描
 // ==========================================
 static BOOL scanAndTrigger(UIView *view) {
     if (!view || view.isHidden || view.alpha < 0.1) return NO;
@@ -306,33 +170,18 @@ static BOOL scanAndTrigger(UIView *view) {
     if (textToCheck.length > 0 && textToCheck.length < 20) {
         for (NSString *keyword in kSkipKeywords) {
             if ([textToCheck containsString:keyword]) {
-                // 先执行诊断并写入文件
-                diagnoseSkipButton(view);
-                
                 CGRect frameInWindow = [view convertRect:view.bounds toView:nil];
-                NSString *msg = [NSString stringWithFormat:@"🔬 已发现目标，正在诊断...\n文字: \"%@\"\n类名: %@\n坐标: (%.0f, %.0f)", 
-                                 textToCheck, NSStringFromClass([view class]), 
-                                 frameInWindow.origin.x, frameInWindow.origin.y];
+                NSString *msg = [NSString stringWithFormat:@"✅ 已跳过！\n文字: \"%@\"\n类名: %@", 
+                                 textToCheck, NSStringFromClass([view class])];
                 
                 dispatch_async(dispatch_get_main_queue(), ^{
                     if (g_statusLabel) {
                         g_statusLabel.text = msg;
-                        g_statusLabel.textColor = [UIColor orangeColor];
+                        g_statusLabel.textColor = [UIColor greenColor];
                     }
                 });
                 
-                // 延迟0.1秒确保诊断日志先写入，再执行点击
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                    forceTriggerSkip(view);
-                    
-                    dispatch_async(dispatch_get_main_queue(), ^{
-                        if (g_statusLabel) {
-                            g_statusLabel.text = [NSString stringWithFormat:@"✅ 已尝试跳过！\n文字: \"%@\"", textToCheck];
-                            g_statusLabel.textColor = [UIColor greenColor];
-                        }
-                    });
-                });
-                
+                forceTriggerSkip(view);
                 return YES;
             }
         }
@@ -379,7 +228,7 @@ static void radarTick() {
 }
 
 // ==========================================
-// 监听前台恢复，重置扫描状态
+// 监听前台恢复
 // ==========================================
 %hook UIApplication
 - (void)applicationDidBecomeActive:(UIApplication *)application {
@@ -392,7 +241,6 @@ static void radarTick() {
             g_statusLabel.textColor = [UIColor yellowColor];
         }
     });
-    writeDiagLog(@"🔄 扫描状态已重置");
 }
 %end
 
@@ -403,10 +251,6 @@ static void radarTick() {
     NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
     NSArray *blacklist = @[@"com.apple.springboard", @"com.apple.Preferences", @"com.apple.mobilesafari"];
     if (!bundleID || [blacklist containsObject:bundleID]) return;
-
-    // 每次启动清空旧日志
-    [[NSFileManager defaultManager] removeItemAtPath:getDiagLogPath() error:nil];
-    writeDiagLog([NSString stringWithFormat:@"🚀 通用广告跳过雷达(Documents日志版)已启动: %@", bundleID]);
 
     kSkipKeywords = @[@"跳过", @"关闭", @"Skip", @"skip", @"s", @"S", @"秒"];
 
