@@ -121,7 +121,7 @@ static BOOL scanAndDetect(UIView *view) {
     if (textToCheck.length > 0 && textToCheck.length < 20) {
         for (NSString *keyword in kSkipKeywords) {
             if ([textToCheck containsString:keyword]) {
-                CGRect frameInWindow = [view convertRect:view.bounds toView:nil];
+                // 剔除了未使用的 frameInWindow 变量，彻底解决 -Werror 报错
                 NSString *msg = [NSString stringWithFormat:@"🎯 发现目标！\n文字: \"%@\"\n类名: %@\n✅ 已执行安全跳过点击", 
                                  textToCheck, NSStringFromClass([view class])];
                 
