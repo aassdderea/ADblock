@@ -170,7 +170,7 @@ static BOOL scanAndTrigger(UIView *view) {
     if (textToCheck.length > 0 && textToCheck.length < 20) {
         for (NSString *keyword in kSkipKeywords) {
             if ([textToCheck containsString:keyword]) {
-                CGRect frameInWindow = [view convertRect:view.bounds toView:nil];
+                // ✅ 已移除未使用的 frameInWindow 变量，修复 -Werror 编译错误
                 NSString *msg = [NSString stringWithFormat:@"✅ 已跳过！\n文字: \"%@\"\n类名: %@", 
                                  textToCheck, NSStringFromClass([view class])];
                 
