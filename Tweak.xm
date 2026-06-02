@@ -1,5 +1,5 @@
 // ==========================================
-// Tweak.xm - GDT跳过雷达 (方法级探测版)
+// Tweak.xm - GDT跳过雷达 (安全诊断版)
 // ==========================================
 #import <UIKit/UIKit.h>
 #import <Foundation/Foundation.h>
@@ -42,19 +42,17 @@ static void writeDiagLog(NSString *message) {
 }
 
 // ==========================================
-// 🔬 GDT 方法级深度探测 + 触发
+// 🔬 安全诊断（零调用，仅读取）
 // ==========================================
-static void probeAndTriggerGDT(UIView *skipView) {
+static void safeDiagnoseGDT(UIView *skipView) {
     if (!skipView) return;
     
     dispatch_async(dispatch_get_main_queue(), ^{
         @try {
-            writeDiagLog(@"====== GDT方法级探测开始 ======");
+            writeDiagLog(@"====== 安全诊断开始（无方法调用） ======");
             
-            // 1. 收集所有 GDT 相关对象实例
+            // 1. 收集所有 GDT/Splash 相关对象
             NSMutableArray *gdtObjects = [NSMutableArray array];
-            
-            // 从 skipView 向上遍历收集
             UIView *v = skipView;
             while (v) {
                 NSString *cls = NSStringFromClass([v class]);
@@ -64,7 +62,6 @@ static void probeAndTriggerGDT(UIView *skipView) {
                 v = v.superview;
             }
             
-            // 遍历当前 window 所有子视图补充收集
             UIWindow *win = skipView.window;
             if (win) {
                 for (UIView *sub in win.subviews) {
@@ -77,9 +74,7 @@ static void probeAndTriggerGDT(UIView *skipView) {
             
             writeDiagLog([NSString stringWithFormat:@"找到 %lu 个GDT相关对象", (unsigned long)gdtObjects.count]);
             
-            // 2. 对每个 GDT 对象枚举所有实例方法，筛选跳过相关方法
-            NSMutableSet *calledMethods = [NSMutableSet set];
-            
+            // 2. 仅枚举并记录方法签名（不调用！）
             for (id obj in gdtObjects) {
                 NSString *objCls = NSStringFromClass([obj class]);
                 unsigned int methodCount = 0;
@@ -90,8 +85,8 @@ static void probeAndTriggerGDT(UIView *skipView) {
                 for (unsigned int i = 0; i < methodCount; i++) {
                     SEL sel = method_getName(methods[i]);
                     NSString *selName = NSStringFromSelector(sel);
+                    const char *typeEncoding = method_getTypeEncoding(methods[i]);
                     
-                    // 筛选包含 skip/close/click/tap/dismiss/handle/on 的方法
                     NSString *lower = [selName lowercaseString];
                     BOOL isSkipRelated = [lower containsString:@"skip"] || 
                                         [lower containsString:@"close"] || 
@@ -101,97 +96,58 @@ static void probeAndTriggerGDT(UIView *skipView) {
                                         [lower containsString:@"handle"] ||
                                         [lower containsString:@"on"] ||
                                         [lower containsString:@"button"] ||
-                                        [lower containsString:@"action"];
+                                        [lower containsString:@"action"] ||
+                                        [lower containsString:@"finish"] ||
+                                        [lower containsString:@"complete"];
                     
                     if (isSkipRelated) {
-                        writeDiagLog([NSString stringWithFormat:@"  🎯 %@", selName]);
-                        
-                        // 尝试调用（仅对无参或单参方法）
-                        const char *typeEncoding = method_getTypeEncoding(methods[i]);
-                        // typeEncoding[0] 是返回类型，[1]是@, [2]是:, 之后是参数
-                        // 无额外参数时长度 <= 3 (@:@)
-                        NSUInteger argCount = strlen(typeEncoding) > 3 ? 1 : 0;
-                        
-                        NSString *callKey = [NSString stringWithFormat:@"%@.%@", objCls, selName];
-                        if (![calledMethods containsObject:callKey]) {
-                            [calledMethods addObject:callKey];
-                            @try {
-                                if (argCount == 0) {
-                                    #pragma clang diagnostic push
-                                    #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-                                    [obj performSelector:sel];
-                                    #pragma clang diagnostic pop
-                                } else {
-                                    // 单参方法传入自身或nil
-                                    #pragma clang diagnostic push
-                                    #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-                                    [obj performSelector:sel withObject:obj];
-                                    #pragma clang diagnostic pop
-                                }
-                                writeDiagLog([NSString stringWithFormat:@"     ✅ 已调用 %@.%@", objCls, selName]);
-                            } @catch (NSException *e) {
-                                writeDiagLog([NSString stringWithFormat:@"     ❌ 调用异常: %@", e.reason]);
-                            }
-                        }
+                        writeDiagLog([NSString stringWithFormat:@"  🎯 %@ | type: %s", selName, typeEncoding ? typeEncoding : "unknown"]);
                     }
                 }
                 free(methods);
+                
+                // 3. 仅记录 delegate 信息（不调用！）
+                if ([obj respondsToSelector:@selector(delegate)]) {
+                    @try {
+                        id delegate = [obj performSelector:@selector(delegate)];
+                        if (delegate) {
+                            NSString *delCls = NSStringFromClass([delegate class]);
+                            writeDiagLog([NSString stringWithFormat:@"%@.delegate = %@", objCls, delCls]);
+                            
+                            // 仅检查 delegate 是否实现关键方法（不执行）
+                            NSArray *delSels = @[@"splashAdClosed:", @"splashAdDidClose:", @"splashAdSuccessPresentScreen:", 
+                                                 @"unifiedNativeAdDidClose:", @"nativeAdDidClose:", @"splashAdExposured:"];
+                            for (NSString *selName in delSels) {
+                                if ([delegate respondsToSelector:NSSelectorFromString(selName)]) {
+                                    writeDiagLog([NSString stringWithFormat:@"  ✅ delegate implements: %@", selName]);
+                                }
+                            }
+                        }
+                    } @catch (NSException *e) {
+                        writeDiagLog([NSString stringWithFormat:@"⚠️ delegate读取异常: %@", e.reason]);
+                    }
+                }
             }
             
-            // 3. 检查 NotificationCenter 中是否有 GDT 相关的跳过通知
-            writeDiagLog(@"--- 检查已知GDT通知 ---");
-            NSArray *knownNotifications = @[
+            // 4. 仅发送最安全的跳过通知（不带 object/userInfo，避免触发校验）
+            writeDiagLog(@"--- 发送安全通知 ---");
+            NSArray *safeNotifications = @[
                 @"GDTSplashAdDidCloseNotification",
-                @"GDTSplashAdSkipNotification", 
-                @"GDTSplashAdClickedNotification",
-                @"GDTUnifiedBannerAdDidCloseNotification",
-                @"kGDTSplashAdSkipNotify",
-                @"kGDTSplashAdCloseNotify"
+                @"kGDTSplashAdSkipNotify"
             ];
-            
-            for (NSString *notifName in knownNotifications) {
+            for (NSString *notifName in safeNotifications) {
                 @try {
-                    [[NSNotificationCenter defaultCenter] postNotificationName:notifName object:nil];
-                    writeDiagLog([NSString stringWithFormat:@"📢 已发送通知: %@", notifName]);
+                    [[NSNotificationCenter defaultCenter] postNotificationName:notifName object:nil userInfo:nil];
+                    writeDiagLog([NSString stringWithFormat:@"📢 已发送: %@", notifName]);
                 } @catch (NSException *e) {
                     writeDiagLog([NSString stringWithFormat:@"❌ 通知异常: %@", e.reason]);
                 }
             }
             
-            // 4. 尝试通过 delegate 触发
-            writeDiagLog(@"--- 检查delegate ---");
-            for (id obj in gdtObjects) {
-                if ([obj respondsToSelector:@selector(delegate)]) {
-                    id delegate = [obj performSelector:@selector(delegate)];
-                    if (delegate) {
-                        NSString *delCls = NSStringFromClass([delegate class]);
-                        writeDiagLog([NSString stringWithFormat:@"%@.delegate = %@", NSStringFromClass([obj class]), delCls]);
-                        
-                        // 检查 delegate 是否实现了 splashAdSuccessPresentScreen / splashAdClosed 等方法
-                        NSArray *delSels = @[@"splashAdClosed:", @"splashAdDidClose:", @"splashAdSuccessPresentScreen:", 
-                                             @"unifiedNativeAdDidClose:", @"nativeAdDidClose:"];
-                        for (NSString *selName in delSels) {
-                            SEL sel = NSSelectorFromString(selName);
-                            if ([delegate respondsToSelector:sel]) {
-                                @try {
-                                    #pragma clang diagnostic push
-                                    #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-                                    [delegate performSelector:sel withObject:obj];
-                                    #pragma clang diagnostic pop
-                                    writeDiagLog([NSString stringWithFormat:@"✅ delegate.%@ 已调用", selName]);
-                                } @catch (NSException *e) {
-                                    writeDiagLog([NSString stringWithFormat:@"❌ delegate调用异常: %@", e.reason]);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            
-            writeDiagLog(@"====== GDT方法级探测结束 ======\n");
+            writeDiagLog(@"====== 安全诊断结束 ======\n");
             
         } @catch (NSException *e) {
-            writeDiagLog([NSString stringWithFormat:@"❌ 探测异常: %@", e]);
+            writeDiagLog([NSString stringWithFormat:@"❌ 诊断异常: %@", e]);
         }
     });
 }
@@ -241,7 +197,7 @@ static void ensureOverlayOnTop() {
             g_statusLabel.layer.cornerRadius = 10;
             g_statusLabel.clipsToBounds = YES;
             g_statusLabel.numberOfLines = 0;
-            g_statusLabel.text = @"🔍 雷达已启动...\n正在扫描广告按钮";
+            g_statusLabel.text = @"🔍 安全诊断模式\n正在收集GDT信息...";
             
             [g_overlayView addSubview:g_statusLabel];
             [topWindow addSubview:g_overlayView];
@@ -268,16 +224,16 @@ static BOOL scanAndTrigger(UIView *view) {
             if ([textToCheck containsString:keyword]) {
                 dispatch_async(dispatch_get_main_queue(), ^{
                     if (g_statusLabel) {
-                        g_statusLabel.text = [NSString stringWithFormat:@"🎯 已锁定 \"%@\"\n正在探测跳过方法...", textToCheck];
+                        g_statusLabel.text = [NSString stringWithFormat:@"🎯 已锁定 \"%@\"\n安全诊断中...", textToCheck];
                         g_statusLabel.textColor = [UIColor orangeColor];
                     }
                 });
                 
-                probeAndTriggerGDT(view);
+                safeDiagnoseGDT(view);
                 
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.8 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                     if (g_statusLabel) {
-                        g_statusLabel.text = [NSString stringWithFormat:@"✅ 探测完成\n文字: \"%@\"\n请查看日志", textToCheck];
+                        g_statusLabel.text = [NSString stringWithFormat:@"✅ 诊断完成\n请查看日志\n文字: \"%@\"", textToCheck];
                         g_statusLabel.textColor = [UIColor greenColor];
                     }
                 });
@@ -328,7 +284,7 @@ static void radarTick() {
     g_hasSkipped = NO;
     dispatch_async(dispatch_get_main_queue(), ^{
         if (g_statusLabel) {
-            g_statusLabel.text = @"🔍 雷达已重启...";
+            g_statusLabel.text = @"🔍 安全诊断模式已重启";
             g_statusLabel.textColor = [UIColor yellowColor];
         }
     });
@@ -342,7 +298,7 @@ static void radarTick() {
     if (!bundleID || [blacklist containsObject:bundleID]) return;
 
     [[NSFileManager defaultManager] removeItemAtPath:getDiagLogPath() error:nil];
-    writeDiagLog([NSString stringWithFormat:@"🚀 GDT方法级探测版已启动: %@", bundleID]);
+    writeDiagLog([NSString stringWithFormat:@"🚀 GDT安全诊断版已启动: %@", bundleID]);
 
     kSkipKeywords = @[@"跳过", @"关闭", @"Skip", @"skip", @"s", @"S", @"秒"];
 
