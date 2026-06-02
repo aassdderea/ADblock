@@ -102,7 +102,7 @@ static void forceTriggerSkip(UIView *skipButton) {
             // 3. 【终极兜底】如果以上全失效，直接在 skipButton 的中心坐标伪造触摸
             // 获取 skipButton 在 window 中的绝对坐标
             CGRect rectInWindow = [skipButton convertRect:skipButton.bounds toView:nil];
-            CGPoint centerPoint = CGPointMake(CGRectGetMidX(rectInWindow), CGRectGetGetMidY(rectInWindow));
+            CGPoint centerPoint = CGPointMake(CGRectGetMidX(rectInWindow), CGRectGetMidY(rectInWindow));
             
             // 找到该坐标下真正可见、可交互的最顶层视图
             UIWindow *keyWindow = skipButton.window;
