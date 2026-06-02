@@ -1,4 +1,5 @@
 #import <UIKit/UIKit.h>
+#import <objc/runtime.h>
 
 // ==========================================
 // 全局变量
@@ -7,10 +8,10 @@ static UIView *g_overlayView = nil;
 static UILabel *g_statusLabel = nil;
 static NSArray *kSkipKeywords = nil;
 static int g_scanCount = 0;
-static BOOL g_hasClicked = NO; // 防止重复点击
+static BOOL g_hasClicked = NO;
 
 // ==========================================
-// 第一步：确保 UI 在任何页面（包括广告页）绝对置顶
+// UI 置顶 (保持不变)
 // ==========================================
 static void ensureOverlayOnTop() {
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -27,7 +28,6 @@ static void ensureOverlayOnTop() {
                 }
             }
         }
-        
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
         if (!topWindow) {
@@ -39,12 +39,10 @@ static void ensureOverlayOnTop() {
             }
         }
 #pragma clang diagnostic pop
-
         if (!topWindow) return;
 
         if (!g_overlayView || g_overlayView.window != topWindow) {
             if (g_overlayView) [g_overlayView removeFromSuperview];
-            
             g_overlayView = [[UIView alloc] initWithFrame:topWindow.bounds];
             g_overlayView.backgroundColor = [UIColor clearColor];
             g_overlayView.userInteractionEnabled = NO;
@@ -67,50 +65,85 @@ static void ensureOverlayOnTop() {
 }
 
 // ==========================================
-// 第三步：安全模拟点击（三重保险策略）
+// 🎯 核心修复：针对 CSJSkipButton 等隐藏按钮的强制点击
 // ==========================================
-static void safeTriggerClick(UIView *targetView) {
+static void forceTriggerSkip(UIView *skipButton) {
     dispatch_async(dispatch_get_main_queue(), ^{
         @try {
-            // 策略 1：如果是标准按钮/控件，直接发送原生点击事件（最安全、最标准）
-            if ([targetView isKindOfClass:[UIControl class]]) {
-                [(UIControl *)targetView sendActionsForControlEvents:UIControlEventTouchDown];
-                [(UIControl *)targetView sendActionsForControlEvents:UIControlEventTouchUpInside];
-                return;
+            // 1. 优先尝试直接点击自身（万一它其实能响应）
+            if ([skipButton isKindOfClass:[UIControl class]]) {
+                [(UIControl *)skipButton sendActionsForControlEvents:UIControlEventTouchDown];
+                [(UIControl *)skipButton sendActionsForControlEvents:UIControlEventTouchUpInside];
+            }
+            if ([skipButton respondsToSelector:@selector(accessibilityActivate)]) {
+                [skipButton accessibilityActivate];
             }
             
-            // 策略 2：调用 iOS 无障碍激活（针对很多自定义 View 的跳过按钮极其有效）
-            if ([targetView respondsToSelector:@selector(accessibilityActivate)]) {
-                if ([targetView accessibilityActivate]) return;
-            }
-            
-            // 策略 3：KVC 状态机欺骗法（安全触发手势，无 ARC 报错，无闪退风险）
-            for (UIGestureRecognizer *gesture in targetView.gestureRecognizers) {
-                if ([gesture isKindOfClass:[UITapGestureRecognizer class]]) {
-                    [gesture setValue:@(UIGestureRecognizerStateEnded) forKey:@"state"];
+            // 2. 【关键】向上遍历父视图，寻找真正绑定手势的容器 (如 CSJSplashView)
+            UIView *targetView = skipButton.superview;
+            while (targetView) {
+                // 尝试触发父视图的手势
+                for (UIGestureRecognizer *gesture in targetView.gestureRecognizers) {
+                    if ([gesture isKindOfClass:[UITapGestureRecognizer class]]) {
+                        [gesture setValue:@(UIGestureRecognizerStateEnded) forKey:@"state"];
+                        NSLog(@"[AdBlocker] ✅ 成功触发父视图手势: %@", NSStringFromClass([targetView class]));
+                        return;
+                    }
+                }
+                // 尝试触发父视图的 UIControl 事件
+                if ([targetView isKindOfClass:[UIControl class]]) {
+                    [(UIControl *)targetView sendActionsForControlEvents:UIControlEventTouchUpInside];
+                    NSLog(@"[AdBlocker] ✅ 成功触发父视图 UIControl: %@", NSStringFromClass([targetView class]));
                     return;
+                }
+                targetView = targetView.superview;
+            }
+            
+            // 3. 【终极兜底】如果以上全失效，直接在 skipButton 的中心坐标伪造触摸
+            // 获取 skipButton 在 window 中的绝对坐标
+            CGRect rectInWindow = [skipButton convertRect:skipButton.bounds toView:nil];
+            CGPoint centerPoint = CGPointMake(CGRectGetMidX(rectInWindow), CGRectGetGetMidY(rectInWindow));
+            
+            // 找到该坐标下真正可见、可交互的最顶层视图
+            UIWindow *keyWindow = skipButton.window;
+            if (keyWindow) {
+                UIView *realHitView = [keyWindow hitTest:centerPoint withEvent:nil];
+                if (realHitView && realHitView != keyWindow) {
+                    NSLog(@"[AdBlocker] 🎯 坐标命中真实视图: %@，执行点击", NSStringFromClass([realHitView class]));
+                    if ([realHitView isKindOfClass:[UIControl class]]) {
+                        [(UIControl *)realHitView sendActionsForControlEvents:UIControlEventTouchUpInside];
+                    } else {
+                        for (UIGestureRecognizer *g in realHitView.gestureRecognizers) {
+                            if ([g isKindOfClass:[UITapGestureRecognizer class]]) {
+                                [g setValue:@(UIGestureRecognizerStateEnded) forKey:@"state"];
+                                break;
+                            }
+                        }
+                    }
                 }
             }
             
         } @catch (NSException *exception) {
-            NSLog(@"[AdBlocker] ⚠️ 触发点击时捕获异常: %@", exception);
+            NSLog(@"[AdBlocker] ⚠️ 强制点击异常: %@", exception);
         }
     });
 }
 
 // ==========================================
-// 第二步：深度雷达扫描 + 触发点击
+// 雷达扫描 (忽略 hidden 状态，精准匹配)
 // ==========================================
 static BOOL scanAndDetect(UIView *view) {
-    if (!view || view.isHidden || view.alpha < 0.1) return NO;
+    // ⚠️ 注意：这里不再检查 view.isHidden，因为 CSJSkipButton 是隐藏的！
+    if (!view || view.alpha < 0.01) return NO; 
     if (view == g_overlayView) return NO;
 
     NSString *textToCheck = nil;
+    NSString *className = NSStringFromClass([view class]);
 
+    // 提取文字
     if ([view isKindOfClass:[UILabel class]]) {
         textToCheck = ((UILabel *)view).text;
-    } 
-    else if ([view isKindOfClass:[UIButton class]]) {
+    } else if ([view isKindOfClass:[UIButton class]]) {
         textToCheck = [(UIButton *)view currentTitle];
         if (!textToCheck) textToCheck = [(UIButton *)view titleLabel].text;
     }
@@ -118,51 +151,58 @@ static BOOL scanAndDetect(UIView *view) {
         textToCheck = view.accessibilityLabel;
     }
 
-    if (textToCheck.length > 0 && textToCheck.length < 20) {
+    BOOL isMatch = NO;
+    
+    // 匹配规则 1：类名直接命中穿山甲跳过按钮
+    if ([className isEqualToString:@"CSJSkipButton"]) {
+        isMatch = YES;
+    }
+    // 匹配规则 2：文字包含跳过关键词
+    if (!isMatch && textToCheck.length > 0 && textToCheck.length < 20) {
         for (NSString *keyword in kSkipKeywords) {
             if ([textToCheck containsString:keyword]) {
-                // 剔除了未使用的 frameInWindow 变量，彻底解决 -Werror 报错
-                NSString *msg = [NSString stringWithFormat:@"🎯 发现目标！\n文字: \"%@\"\n类名: %@\n✅ 已执行安全跳过点击", 
-                                 textToCheck, NSStringFromClass([view class])];
-                
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    if (g_statusLabel) {
-                        g_statusLabel.text = msg;
-                        g_statusLabel.textColor = [UIColor greenColor];
-                    }
-                });
-                
-                // 🔥 触发安全点击
-                safeTriggerClick(view);
-                return YES;
+                isMatch = YES;
+                break;
             }
         }
     }
 
+    if (isMatch) {
+        NSString *msg = [NSString stringWithFormat:@"🎯 发现目标!\n类名: %@\n文字: \"%@\"\nHidden: %@\n✅ 已执行强制跳过", 
+                         className, textToCheck ?: @"无", view.isHidden ? @"YES" : @"NO"];
+        
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (g_statusLabel) {
+                g_statusLabel.text = msg;
+                g_statusLabel.textColor = [UIColor greenColor];
+            }
+        });
+        
+        forceTriggerSkip(view);
+        return YES;
+    }
+
+    // 递归扫描子视图
     for (NSInteger i = view.subviews.count - 1; i >= 0; i--) {
         if (scanAndDetect(view.subviews[i])) return YES;
     }
-    
     return NO;
 }
 
 // ==========================================
-// 定时器核心逻辑
+// 定时器 & 入口
 // ==========================================
 static void radarTick() {
     g_scanCount++;
-    if (g_scanCount > 100 || g_hasClicked) { 
-        return; 
-    }
+    if (g_scanCount > 100 || g_hasClicked) return;
 
     ensureOverlayOnTop();
-
     dispatch_async(dispatch_get_main_queue(), ^{
         UIWindow *scanWindow = g_overlayView.window;
         if (scanWindow) {
             BOOL found = scanAndDetect(scanWindow);
             if (found) {
-                g_hasClicked = YES; // 标记已点击，停止扫描
+                g_hasClicked = YES;
             } else if (g_statusLabel) {
                 g_statusLabel.text = [NSString stringWithFormat:@"🔍 雷达扫描中... (%d/100)\n暂未发现跳过按钮", g_scanCount];
                 g_statusLabel.textColor = [UIColor yellowColor];
@@ -171,16 +211,12 @@ static void radarTick() {
     });
 }
 
-// ==========================================
-// 插件入口
-// ==========================================
 %ctor {
     NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
     NSArray *blacklist = @[@"com.apple.springboard", @"com.apple.Preferences", @"com.apple.mobilesafari"];
     if (!bundleID || [blacklist containsObject:bundleID]) return;
 
-    NSLog(@"[AdBlocker] 🚀 最终完整版：广告拦截器已启动: %@", bundleID);
-
+    NSLog(@"[AdBlocker] 🚀 穿山甲专杀版已启动: %@", bundleID);
     kSkipKeywords = @[@"跳过", @"关闭", @"Skip", @"skip", @"s", @"S", @"秒"];
 
     dispatch_async(dispatch_get_main_queue(), ^{
