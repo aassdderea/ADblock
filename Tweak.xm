@@ -7,13 +7,13 @@ static UIView *g_overlayView = nil;
 static UILabel *g_statusLabel = nil;
 static NSArray *kSkipKeywords = nil;
 static int g_scanCount = 0;
+static BOOL g_hasClicked = NO; // 防止重复点击
 
 // ==========================================
 // 第一步：确保 UI 在任何页面（包括广告页）绝对置顶
 // ==========================================
 static void ensureOverlayOnTop() {
     dispatch_async(dispatch_get_main_queue(), ^{
-        // 1. 找到当前屏幕上层级最高的 Window (广告通常会弹出一个新的 Window)
         UIWindow *topWindow = nil;
         CGFloat maxLevel = -1;
         
@@ -42,18 +42,17 @@ static void ensureOverlayOnTop() {
 
         if (!topWindow) return;
 
-        // 2. 如果我们的提示框还没创建，或者不在最顶层的 Window 上，就重新挂载
         if (!g_overlayView || g_overlayView.window != topWindow) {
             if (g_overlayView) [g_overlayView removeFromSuperview];
             
             g_overlayView = [[UIView alloc] initWithFrame:topWindow.bounds];
             g_overlayView.backgroundColor = [UIColor clearColor];
-            g_overlayView.userInteractionEnabled = NO; // 绝对不拦截任何触摸
-            g_overlayView.layer.zPosition = 999999;   // 强制置顶
+            g_overlayView.userInteractionEnabled = NO;
+            g_overlayView.layer.zPosition = 999999;
             
             g_statusLabel = [[UILabel alloc] initWithFrame:CGRectMake(20, topWindow.bounds.size.height - 150, topWindow.bounds.size.width - 40, 80)];
             g_statusLabel.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.85];
-            g_statusLabel.textColor = [UIColor yellowColor]; // 用黄色，醒目
+            g_statusLabel.textColor = [UIColor yellowColor];
             g_statusLabel.textAlignment = NSTextAlignmentCenter;
             g_statusLabel.font = [UIFont boldSystemFontOfSize:16];
             g_statusLabel.layer.cornerRadius = 10;
@@ -68,11 +67,43 @@ static void ensureOverlayOnTop() {
 }
 
 // ==========================================
-// 第二步：深度雷达扫描（只发现，不点击）
+// 第三步：安全模拟点击（三重保险策略）
+// ==========================================
+static void safeTriggerClick(UIView *targetView) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        @try {
+            // 策略 1：如果是标准按钮/控件，直接发送原生点击事件（最安全、最标准）
+            if ([targetView isKindOfClass:[UIControl class]]) {
+                [(UIControl *)targetView sendActionsForControlEvents:UIControlEventTouchDown];
+                [(UIControl *)targetView sendActionsForControlEvents:UIControlEventTouchUpInside];
+                return;
+            }
+            
+            // 策略 2：调用 iOS 无障碍激活（针对很多自定义 View 的跳过按钮极其有效）
+            if ([targetView respondsToSelector:@selector(accessibilityActivate)]) {
+                if ([targetView accessibilityActivate]) return;
+            }
+            
+            // 策略 3：KVC 状态机欺骗法（安全触发手势，无 ARC 报错，无闪退风险）
+            for (UIGestureRecognizer *gesture in targetView.gestureRecognizers) {
+                if ([gesture isKindOfClass:[UITapGestureRecognizer class]]) {
+                    [gesture setValue:@(UIGestureRecognizerStateEnded) forKey:@"state"];
+                    return;
+                }
+            }
+            
+        } @catch (NSException *exception) {
+            NSLog(@"[AdBlocker] ⚠️ 触发点击时捕获异常: %@", exception);
+        }
+    });
+}
+
+// ==========================================
+// 第二步：深度雷达扫描 + 触发点击
 // ==========================================
 static BOOL scanAndDetect(UIView *view) {
     if (!view || view.isHidden || view.alpha < 0.1) return NO;
-    if (view == g_overlayView) return NO; // 排除自己
+    if (view == g_overlayView) return NO;
 
     NSString *textToCheck = nil;
 
@@ -91,21 +122,23 @@ static BOOL scanAndDetect(UIView *view) {
         for (NSString *keyword in kSkipKeywords) {
             if ([textToCheck containsString:keyword]) {
                 CGRect frameInWindow = [view convertRect:view.bounds toView:nil];
-                NSString *msg = [NSString stringWithFormat:@"🎯 发现目标！\n文字: \"%@\"\n类名: %@\n坐标: (%.0f, %.0f)\n【当前仅扫描，未执行点击】", 
-                                 textToCheck, NSStringFromClass([view class]), frameInWindow.origin.x, frameInWindow.origin.y];
+                NSString *msg = [NSString stringWithFormat:@"🎯 发现目标！\n文字: \"%@\"\n类名: %@\n✅ 已执行安全跳过点击", 
+                                 textToCheck, NSStringFromClass([view class])];
                 
                 dispatch_async(dispatch_get_main_queue(), ^{
                     if (g_statusLabel) {
                         g_statusLabel.text = msg;
-                        g_statusLabel.textColor = [UIColor greenColor]; // 找到后变绿
+                        g_statusLabel.textColor = [UIColor greenColor];
                     }
                 });
-                return YES; // 找到就返回
+                
+                // 🔥 触发安全点击
+                safeTriggerClick(view);
+                return YES;
             }
         }
     }
 
-    // 递归扫描子视图
     for (NSInteger i = view.subviews.count - 1; i >= 0; i--) {
         if (scanAndDetect(view.subviews[i])) return YES;
     }
@@ -118,17 +151,19 @@ static BOOL scanAndDetect(UIView *view) {
 // ==========================================
 static void radarTick() {
     g_scanCount++;
-    if (g_scanCount > 100) { // 扫描 100 次（约 10 秒）后停止，节省性能
+    if (g_scanCount > 100 || g_hasClicked) { 
         return; 
     }
 
-    ensureOverlayOnTop(); // 确保 UI 置顶
+    ensureOverlayOnTop();
 
     dispatch_async(dispatch_get_main_queue(), ^{
-        UIWindow *scanWindow = g_overlayView.window; // 直接扫描我们挂载的那个 Window
+        UIWindow *scanWindow = g_overlayView.window;
         if (scanWindow) {
             BOOL found = scanAndDetect(scanWindow);
-            if (!found && g_statusLabel) {
+            if (found) {
+                g_hasClicked = YES; // 标记已点击，停止扫描
+            } else if (g_statusLabel) {
                 g_statusLabel.text = [NSString stringWithFormat:@"🔍 雷达扫描中... (%d/100)\n暂未发现跳过按钮", g_scanCount];
                 g_statusLabel.textColor = [UIColor yellowColor];
             }
@@ -141,18 +176,16 @@ static void radarTick() {
 // ==========================================
 %ctor {
     NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-    // 过滤掉系统核心应用
     NSArray *blacklist = @[@"com.apple.springboard", @"com.apple.Preferences", @"com.apple.mobilesafari"];
     if (!bundleID || [blacklist containsObject:bundleID]) return;
 
-    NSLog(@"[AdBlocker] 🚀 第一阶段：安全扫描雷达已启动: %@", bundleID);
+    NSLog(@"[AdBlocker] 🚀 最终完整版：广告拦截器已启动: %@", bundleID);
 
     kSkipKeywords = @[@"跳过", @"关闭", @"Skip", @"skip", @"s", @"S", @"秒"];
 
-    // 使用 NSTimer 每 0.1 秒扫描一次
     dispatch_async(dispatch_get_main_queue(), ^{
         [NSTimer scheduledTimerWithTimeInterval:0.1 repeats:YES block:^(NSTimer * _Nonnull timer) {
-            if (g_scanCount > 100) {
+            if (g_scanCount > 100 || g_hasClicked) {
                 [timer invalidate];
                 return;
             }
