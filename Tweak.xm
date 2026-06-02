@@ -1,32 +1,40 @@
 // ==========================================
-// Tweak.xm - GDT开屏广告跳过 (带红圈点击反馈版)
+// Tweak.xm - GDT开屏广告跳过 (带红圈点击反馈修复版)
 // ==========================================
 #import <UIKit/UIKit.h>
 
-static void showTapIndicatorAtPoint(CGPoint point, UIWindow *window) {
+static void showTapIndicatorAtPoint(CGPoint screenPoint) {
     CGFloat size = 40.0;
-    UIView *indicator = [[UIView alloc] initWithFrame:CGRectMake(point.x - size/2, point.y - size/2, size, size)];
+    
+    // 1. 创建独立的透明窗口用于显示红圈
+    UIWindow *indicatorWindow = [[UIWindow alloc] initWithFrame:CGRectMake(screenPoint.x - size/2, screenPoint.y - size/2, size, size)];
+    indicatorWindow.windowLevel = UIWindowLevelAlert + 100;
+    indicatorWindow.backgroundColor = [UIColor clearColor];
+    indicatorWindow.userInteractionEnabled = NO; // 关键：整个窗口都不拦截触摸
+    indicatorWindow.hidden = NO;
+    
+    // 2. 在窗口中添加红圈视图
+    UIView *indicator = [[UIView alloc] initWithFrame:indicatorWindow.bounds];
     indicator.layer.cornerRadius = size / 2;
     indicator.layer.borderWidth = 3.0;
     indicator.layer.borderColor = [UIColor redColor].CGColor;
     indicator.backgroundColor = [[UIColor redColor] colorWithAlphaComponent:0.3];
-    indicator.userInteractionEnabled = NO; // 关键：不拦截任何触摸事件
-    indicator.windowLevel = UIWindowLevelAlert + 100; // 确保在最顶层
+    [indicatorWindow addSubview:indicator];
     
-    [window addSubview:indicator];
-    
+    // 3. 动画结束后销毁整个窗口
     [UIView animateWithDuration:0.3 delay:0.3 options:UIViewAnimationOptionCurveEaseOut animations:^{
         indicator.alpha = 0.0;
         indicator.transform = CGAffineTransformMakeScale(1.5, 1.5);
     } completion:^(BOOL finished) {
-        [indicator removeFromSuperview];
+        indicatorWindow.hidden = YES;
+        // ARC环境下会自动释放，MRC环境需手动处理
     }];
 }
 
 static void simulateSkipTap() {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         @try {
-            // 1. 获取当前最顶层窗口
+            // 1. 获取当前最顶层窗口（用于查找按钮和作为点击目标）
             UIWindow *topWindow = nil;
             CGFloat maxLevel = -1;
             for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
@@ -78,7 +86,7 @@ static void simulateSkipTap() {
             // 3. 计算屏幕绝对坐标并显示红圈
             CGPoint centerInTarget = CGPointMake(skipTarget.bounds.size.width / 2.0, skipTarget.bounds.size.height / 2.0);
             CGPoint screenPoint = [skipTarget convertPoint:centerInTarget toView:nil];
-            showTapIndicatorAtPoint(screenPoint, topWindow);
+            showTapIndicatorAtPoint(screenPoint);
 
             // 4. 简单粗暴：直接发送触摸事件
             if ([skipTarget isKindOfClass:[UIButton class]]) {
