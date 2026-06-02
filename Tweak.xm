@@ -1,5 +1,5 @@
 // ==========================================
-// Tweak.xm - GDT跳过雷达 (延长采集版)
+// Tweak.xm - GDT跳过雷达 (持续监听+异步日志版)
 // ==========================================
 #import <UIKit/UIKit.h>
 #import <Foundation/Foundation.h>
@@ -9,12 +9,14 @@
 static UIView *g_overlayView = nil;
 static UILabel *g_statusLabel = nil;
 static NSArray *kSkipKeywords = nil;
-static int g_scanCount = 0;
-static BOOL g_hasSkipped = NO;
-static CFAbsoluteTime g_startTime = 0; // ⭐ 新增：记录启动时间
+static CFAbsoluteTime g_startTime = 0;
+static BOOL g_collectionEnded = NO;
+
+// ⭐ 异步日志队列，避免主线程阻塞
+static dispatch_queue_t g_logQueue = nil;
 
 // ==========================================
-// 📁 日志工具
+// 📁 异步日志工具
 // ==========================================
 static NSString *getDiagLogPath() {
     static NSString *path = nil;
@@ -27,113 +29,60 @@ static NSString *getDiagLogPath() {
 }
 
 static void writeDiagLog(NSString *message) {
-    if (!message) return;
-    @try {
-        NSString *logPath = getDiagLogPath();
-        // ⭐ 日志中增加相对时间戳，方便定位第4秒的操作
-        CFAbsoluteTime relative = CFAbsoluteTimeGetCurrent() - g_startTime;
-        NSString *entry = [NSString stringWithFormat:@"[+%.2fs] %@\n", relative, message];
-        NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:logPath];
-        if (!fh) {
-            [[NSFileManager defaultManager] createFileAtPath:logPath contents:nil attributes:nil];
-            fh = [NSFileHandle fileHandleForWritingAtPath:logPath];
-        }
-        [fh seekToEndOfFile];
-        [fh writeData:[entry dataUsingEncoding:NSUTF8StringEncoding]];
-        [fh closeFile];
-    } @catch (NSException *e) {}
+    if (!message || g_collectionEnded) return;
+    NSString *msgCopy = [message copy];
+    dispatch_async(g_logQueue, ^{
+        @try {
+            NSString *logPath = getDiagLogPath();
+            CFAbsoluteTime relative = CFAbsoluteTimeGetCurrent() - g_startTime;
+            NSString *entry = [NSString stringWithFormat:@"[+%.2fs] %@\n", relative, msgCopy];
+            NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:logPath];
+            if (!fh) {
+                [[NSFileManager defaultManager] createFileAtPath:logPath contents:nil attributes:nil];
+                fh = [NSFileHandle fileHandleForWritingAtPath:logPath];
+            }
+            [fh seekToEndOfFile];
+            [fh writeData:[entry dataUsingEncoding:NSUTF8StringEncoding]];
+            [fh closeFile];
+        } @catch (NSException *e) {}
+    });
 }
 
 // ==========================================
-// 🔬 安全诊断（零调用，仅读取）
+// 🔬 轻量级持续诊断（可在主线程安全执行）
 // ==========================================
-static void safeDiagnoseGDT(UIView *skipView) {
+static void lightweightDiagnose(UIView *skipView, NSString *triggerReason) {
     if (!skipView) return;
     
-    dispatch_async(dispatch_get_main_queue(), ^{
-        @try {
-            writeDiagLog(@"====== 安全诊断开始（无方法调用） ======");
+    writeDiagLog([NSString stringWithFormat:@"📍 诊断触发: %@", triggerReason]);
+    
+    // 仅记录视图层级和类名，不做 method enumeration
+    NSMutableArray *info = [NSMutableArray array];
+    UIView *v = skipView;
+    int depth = 0;
+    while (v && depth <= 15) {
+        NSString *cls = NSStringFromClass([v class]);
+        [info addObject:[NSString stringWithFormat:@"d%d:%@", depth, cls]];
+        
+        // 仅对 GDT/Splash 类记录手势和 delegate（轻量）
+        if ([cls containsString:@"GDT"] || [cls containsString:@"Splash"]) {
+            NSUInteger gestureCount = v.gestureRecognizers.count;
+            [info addObject:[NSString stringWithFormat:@"  ↳ gestures:%lu", (unsigned long)gestureCount]];
             
-            NSMutableArray *gdtObjects = [NSMutableArray array];
-            UIView *v = skipView;
-            while (v) {
-                NSString *cls = NSStringFromClass([v class]);
-                if ([cls containsString:@"GDT"] || [cls containsString:@"Splash"]) {
-                    [gdtObjects addObject:v];
-                }
-                v = v.superview;
-            }
-            
-            UIWindow *win = skipView.window;
-            if (win) {
-                for (UIView *sub in win.subviews) {
-                    NSString *cls = NSStringFromClass([sub class]);
-                    if (([cls containsString:@"GDT"] || [cls containsString:@"Splash"]) && ![gdtObjects containsObject:sub]) {
-                        [gdtObjects addObject:sub];
-                    }
-                }
-            }
-            
-            writeDiagLog([NSString stringWithFormat:@"找到 %lu 个GDT相关对象", (unsigned long)gdtObjects.count]);
-            
-            for (id obj in gdtObjects) {
-                NSString *objCls = NSStringFromClass([obj class]);
-                unsigned int methodCount = 0;
-                Method *methods = class_copyMethodList([obj class], &methodCount);
-                
-                writeDiagLog([NSString stringWithFormat:@"--- %@ (%lu methods) ---", objCls, (unsigned long)methodCount]);
-                
-                for (unsigned int i = 0; i < methodCount; i++) {
-                    SEL sel = method_getName(methods[i]);
-                    NSString *selName = NSStringFromSelector(sel);
-                    const char *typeEncoding = method_getTypeEncoding(methods[i]);
-                    
-                    NSString *lower = [selName lowercaseString];
-                    BOOL isSkipRelated = [lower containsString:@"skip"] || 
-                                        [lower containsString:@"close"] || 
-                                        [lower containsString:@"click"] || 
-                                        [lower containsString:@"tap"] ||
-                                        [lower containsString:@"dismiss"] ||
-                                        [lower containsString:@"handle"] ||
-                                        [lower containsString:@"on"] ||
-                                        [lower containsString:@"button"] ||
-                                        [lower containsString:@"action"] ||
-                                        [lower containsString:@"finish"] ||
-                                        [lower containsString:@"complete"];
-                    
-                    if (isSkipRelated) {
-                        writeDiagLog([NSString stringWithFormat:@"  🎯 %@ | type: %s", selName, typeEncoding ? typeEncoding : "unknown"]);
-                    }
-                }
-                free(methods);
-                
-                if ([obj respondsToSelector:@selector(delegate)]) {
-                    @try {
-                        id delegate = [obj performSelector:@selector(delegate)];
-                        if (delegate) {
-                            NSString *delCls = NSStringFromClass([delegate class]);
-                            writeDiagLog([NSString stringWithFormat:@"%@.delegate = %@", objCls, delCls]);
-                            
-                            NSArray *delSels = @[@"splashAdClosed:", @"splashAdDidClose:", @"splashAdSuccessPresentScreen:", 
-                                                 @"unifiedNativeAdDidClose:", @"nativeAdDidClose:", @"splashAdExposured:"];
-                            for (NSString *selName in delSels) {
-                                if ([delegate respondsToSelector:NSSelectorFromString(selName)]) {
-                                    writeDiagLog([NSString stringWithFormat:@"  ✅ delegate implements: %@", selName]);
-                                }
-                            }
-                        }
-                    } @catch (NSException *e) {
-                        writeDiagLog([NSString stringWithFormat:@"⚠️ delegate读取异常: %@", e.reason]);
-                    }
+            if ([v respondsToSelector:@selector(delegate)]) {
+                @try {
+                    id del = [v performSelector:@selector(delegate)];
+                    [info addObject:[NSString stringWithFormat:@"  ↳ delegate:%@", del ? NSStringFromClass([del class]) : @"nil"]];
+                } @catch (NSException *e) {
+                    [info addObject:@"  ↳ delegate:EXCEPTION"];
                 }
             }
-            
-            writeDiagLog(@"====== 安全诊断结束 ======\n");
-            
-        } @catch (NSException *e) {
-            writeDiagLog([NSString stringWithFormat:@"❌ 诊断异常: %@", e]);
         }
-    });
+        v = v.superview;
+        depth++;
+    }
+    
+    writeDiagLog([info componentsJoinedByString:@"\n"]);
 }
 
 // ==========================================
@@ -178,118 +127,4 @@ static void ensureOverlayOnTop() {
             g_statusLabel.textColor = [UIColor yellowColor];
             g_statusLabel.textAlignment = NSTextAlignmentCenter;
             g_statusLabel.font = [UIFont boldSystemFontOfSize:16];
-            g_statusLabel.layer.cornerRadius = 10;
-            g_statusLabel.clipsToBounds = YES;
-            g_statusLabel.numberOfLines = 0;
-            g_statusLabel.text = @"🔍 延长采集模式\n请等待广告出现...";
-            
-            [g_overlayView addSubview:g_statusLabel];
-            [topWindow addSubview:g_overlayView];
-        }
-    });
-}
-
-// ==========================================
-// 深度雷达扫描
-// ==========================================
-static BOOL scanAndTrigger(UIView *view) {
-    if (!view || view.isHidden || view.alpha < 0.1 || view == g_overlayView) return NO;
-
-    NSString *textToCheck = nil;
-    if ([view isKindOfClass:[UILabel class]]) textToCheck = ((UILabel *)view).text;
-    else if ([view isKindOfClass:[UIButton class]]) {
-        textToCheck = [(UIButton *)view currentTitle];
-        if (!textToCheck) textToCheck = [(UIButton *)view titleLabel].text;
-    }
-    if (!textToCheck && view.isAccessibilityElement) textToCheck = view.accessibilityLabel;
-
-    if (textToCheck.length > 0 && textToCheck.length < 20) {
-        for (NSString *keyword in kSkipKeywords) {
-            if ([textToCheck containsString:keyword]) {
-                // ⭐ 不再立即返回YES停止扫描，而是持续记录
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    if (g_statusLabel) {
-                        CFAbsoluteTime relative = CFAbsoluteTimeGetCurrent() - g_startTime;
-                        g_statusLabel.text = [NSString stringWithFormat:@"🎯 已锁定 \"%@\"\n采集窗口剩余 %.1fs", textToCheck, MAX(0, 6.0 - relative)];
-                        g_statusLabel.textColor = [UIColor orangeColor];
-                    }
-                });
-                
-                safeDiagnoseGDT(view);
-                // ⭐ 关键：这里不返回 YES，让扫描继续
-            }
-        }
-    }
-
-    for (NSInteger i = view.subviews.count - 1; i >= 0; i--) {
-        scanAndTrigger(view.subviews[i]); // ⭐ 移除短路返回
-    }
-    return NO; // ⭐ 始终返回NO，保持雷达运转
-}
-
-// ==========================================
-// 定时器 & 生命周期
-// ==========================================
-static void radarTick() {
-    // ⭐ 改为基于时间的6秒窗口，而非次数
-    CFAbsoluteTime elapsed = CFAbsoluteTimeGetCurrent() - g_startTime;
-    if (elapsed > 6.0) {
-        dispatch_async(dispatch_get_main_queue(), ^{
-            if (g_statusLabel) {
-                g_statusLabel.text = @"✅ 6秒采集窗口已结束\n请导出日志";
-                g_statusLabel.textColor = [UIColor greenColor];
-            }
-        });
-        writeDiagLog(@"⏱️ 6秒采集窗口结束");
-        return;
-    }
-    
-    ensureOverlayOnTop();
-    dispatch_async(dispatch_get_main_queue(), ^{
-        UIWindow *scanWindow = g_overlayView.window;
-        if (scanWindow) {
-            scanAndTrigger(scanWindow);
-            if (g_statusLabel && elapsed <= 6.0) {
-                g_statusLabel.text = [NSString stringWithFormat:@"🔍 采集中... (+%.1fs/6.0s)", elapsed];
-                g_statusLabel.textColor = [UIColor yellowColor];
-            }
-        }
-    });
-}
-
-%hook UIApplication
-- (void)applicationDidBecomeActive:(UIApplication *)application {
-    %orig;
-    g_startTime = CFAbsoluteTimeGetCurrent(); // ⭐ 重置计时起点
-    g_scanCount = 0;
-    g_hasSkipped = NO;
-    dispatch_async(dispatch_get_main_queue(), ^{
-        if (g_statusLabel) {
-            g_statusLabel.text = @"🔍 延长采集模式已重启\n请在6秒内手动点击跳过";
-            g_statusLabel.textColor = [UIColor yellowColor];
-        }
-    });
-    writeDiagLog(@"🔄 采集窗口已重置 (6s)");
-}
-%end
-
-%ctor {
-    NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-    NSArray *blacklist = @[@"com.apple.springboard", @"com.apple.Preferences", @"com.apple.mobilesafari"];
-    if (!bundleID || [blacklist containsObject:bundleID]) return;
-
-    g_startTime = CFAbsoluteTimeGetCurrent();
-    [[NSFileManager defaultManager] removeItemAtPath:getDiagLogPath() error:nil];
-    writeDiagLog([NSString stringWithFormat:@"🚀 GDT延长采集版已启动: %@", bundleID]);
-
-    kSkipKeywords = @[@"跳过", @"关闭", @"Skip", @"skip", @"s", @"S", @"秒"];
-
-    dispatch_async(dispatch_get_main_queue(), ^{
-        // ⭐ 提高刷新率到50ms，确保捕捉瞬时操作
-        [NSTimer scheduledTimerWithTimeInterval:0.05 repeats:YES block:^(NSTimer * _Nonnull timer) {
-            CFAbsoluteTime elapsed = CFAbsoluteTimeGetCurrent() - g_startTime;
-            if (elapsed > 6.0) { [timer invalidate]; return; }
-            radarTick();
-        }];
-    });
-}
+            g_statusLabel.l
