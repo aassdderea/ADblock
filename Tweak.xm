@@ -1,5 +1,5 @@
 // ==========================================
-// Tweak.xm - 通用广告跳过雷达 (文件日志诊断版)
+// Tweak.xm - 通用广告跳过雷达 (Documents日志版)
 // ==========================================
 #import <UIKit/UIKit.h>
 #import <Foundation/Foundation.h>
@@ -12,7 +12,20 @@ static UILabel *g_statusLabel = nil;
 static NSArray *kSkipKeywords = nil;
 static int g_scanCount = 0;
 static BOOL g_hasSkipped = NO;
-static NSString *const kDiagLogPath = @"/tmp/adblock_diag.log";
+
+// ==========================================
+// 📁 动态获取 Documents 日志路径
+// ==========================================
+static NSString *getDiagLogPath() {
+    static NSString *path = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
+        NSString *docDir = paths.firstObject;
+        path = [docDir stringByAppendingPathComponent:@"adblock_diag.log"];
+    });
+    return path;
+}
 
 // ==========================================
 // 📝 文件日志写入工具
@@ -20,19 +33,20 @@ static NSString *const kDiagLogPath = @"/tmp/adblock_diag.log";
 static void writeDiagLog(NSString *message) {
     if (!message) return;
     @try {
+        NSString *logPath = getDiagLogPath();
         NSString *timestamp = [[NSDate date] description];
         NSString *logEntry = [NSString stringWithFormat:@"[%@] %@\n", timestamp, message];
         
-        NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:kDiagLogPath];
+        NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:logPath];
         if (!fh) {
-            [[NSFileManager defaultManager] createFileAtPath:kDiagLogPath contents:nil attributes:nil];
-            fh = [NSFileHandle fileHandleForWritingAtPath:kDiagLogPath];
+            [[NSFileManager defaultManager] createFileAtPath:logPath contents:nil attributes:nil];
+            fh = [NSFileHandle fileHandleForWritingAtPath:logPath];
         }
         [fh seekToEndOfFile];
         [fh writeData:[logEntry dataUsingEncoding:NSUTF8StringEncoding]];
         [fh closeFile];
     } @catch (NSException *e) {
-        // 文件写入失败时静默处理，避免影响主流程
+        // 静默处理，避免影响主流程
     }
 }
 
@@ -390,9 +404,9 @@ static void radarTick() {
     NSArray *blacklist = @[@"com.apple.springboard", @"com.apple.Preferences", @"com.apple.mobilesafari"];
     if (!bundleID || [blacklist containsObject:bundleID]) return;
 
-    // 每次启动清空旧日志，避免历史数据干扰
-    [[NSFileManager defaultManager] removeItemAtPath:kDiagLogPath error:nil];
-    writeDiagLog([NSString stringWithFormat:@"🚀 通用广告跳过雷达(文件日志版)已启动: %@", bundleID]);
+    // 每次启动清空旧日志
+    [[NSFileManager defaultManager] removeItemAtPath:getDiagLogPath() error:nil];
+    writeDiagLog([NSString stringWithFormat:@"🚀 通用广告跳过雷达(Documents日志版)已启动: %@", bundleID]);
 
     kSkipKeywords = @[@"跳过", @"关闭", @"Skip", @"skip", @"s", @"S", @"秒"];
 
