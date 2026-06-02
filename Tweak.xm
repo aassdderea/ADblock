@@ -127,4 +127,129 @@ static void ensureOverlayOnTop() {
             g_statusLabel.textColor = [UIColor yellowColor];
             g_statusLabel.textAlignment = NSTextAlignmentCenter;
             g_statusLabel.font = [UIFont boldSystemFontOfSize:16];
-            g_statusLabel.l
+            g_statusLabel.layer.cornerRadius = 10;
+            g_statusLabel.clipsToBounds = YES;
+            g_statusLabel.numberOfLines = 0;
+            g_statusLabel.text = @"🔍 延长采集模式\n请等待广告出现...";
+            
+            [g_overlayView addSubview:g_statusLabel];
+            [topWindow addSubview:g_overlayView];
+        }
+    });
+}
+
+// ==========================================
+// 持续扫描（不再短路，每帧都记录状态）
+// ==========================================
+static void continuousScan(UIView *view) {
+    if (!view || view.isHidden || view.alpha < 0.1 || view == g_overlayView) return;
+
+    NSString *textToCheck = nil;
+    if ([view isKindOfClass:[UILabel class]]) textToCheck = ((UILabel *)view).text;
+    else if ([view isKindOfClass:[UIButton class]]) {
+        textToCheck = [(UIButton *)view currentTitle];
+        if (!textToCheck) textToCheck = [(UIButton *)view titleLabel].text;
+    }
+    if (!textToCheck && view.isAccessibilityElement) textToCheck = view.accessibilityLabel;
+
+    if (textToCheck.length > 0 && textToCheck.length < 20) {
+        for (NSString *keyword in kSkipKeywords) {
+            if ([textToCheck containsString:keyword]) {
+                CFAbsoluteTime relative = CFAbsoluteTimeGetCurrent() - g_startTime;
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    if (g_statusLabel) {
+                        g_statusLabel.text = [NSString stringWithFormat:@"🎯 \"%@\" 可见\n+%.1fs | 请手动点击跳过", textToCheck, relative];
+                        g_statusLabel.textColor = [UIColor orangeColor];
+                    }
+                });
+                // ⭐ 每次扫描到都记录，但限制频率避免刷屏
+                static CFAbsoluteTime lastLogTime = 0;
+                if (relative - lastLogTime > 0.5) {
+                    lastLogTime = relative;
+                    lightweightDiagnose(view, [NSString stringWithFormat:@"keyword='%@' visible", keyword]);
+                }
+                break;
+            }
+        }
+    }
+
+    for (NSInteger i = view.subviews.count - 1; i >= 0; i--) {
+        continuousScan(view.subviews[i]);
+    }
+}
+
+// ==========================================
+// 定时器 & 生命周期
+// ==========================================
+static void radarTick() {
+    CFAbsoluteTime elapsed = CFAbsoluteTimeGetCurrent() - g_startTime;
+    if (elapsed > 6.0) {
+        g_collectionEnded = YES;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (g_statusLabel) {
+                g_statusLabel.text = @"✅ 6秒采集窗口已结束\n请导出日志";
+                g_statusLabel.textColor = [UIColor greenColor];
+            }
+        });
+        writeDiagLog(@"⏱️ 6秒采集窗口结束");
+        return;
+    }
+    
+    ensureOverlayOnTop();
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIWindow *scanWindow = g_overlayView.window;
+        if (scanWindow) {
+            continuousScan(scanWindow);
+            if (g_statusLabel && elapsed <= 6.0) {
+                // 仅在未锁定时更新倒计时
+                if (![g_statusLabel.text containsString:@"🎯"]) {
+                    g_statusLabel.text = [NSString stringWithFormat:@"🔍 采集中... (+%.1fs/6.0s)", elapsed];
+                    g_statusLabel.textColor = [UIColor yellowColor];
+                }
+            }
+        }
+    });
+    
+    // ⭐ 每帧心跳日志，证明定时器存活
+    static int heartbeatCounter = 0;
+    if (++heartbeatCounter % 20 == 0) { // 约每秒1次
+        writeDiagLog([NSString stringWithFormat:@"💓 heartbeat +%.2fs", elapsed]);
+    }
+}
+
+%hook UIApplication
+- (void)applicationDidBecomeActive:(UIApplication *)application {
+    %orig;
+    g_startTime = CFAbsoluteTimeGetCurrent();
+    g_collectionEnded = NO;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (g_statusLabel) {
+            g_statusLabel.text = @"🔍 采集已重启\n请在6秒内手动点击跳过";
+            g_statusLabel.textColor = [UIColor yellowColor];
+        }
+    });
+    writeDiagLog(@"🔄 采集窗口已重置 (6s)");
+}
+%end
+
+%ctor {
+    NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
+    NSArray *blacklist = @[@"com.apple.springboard", @"com.apple.Preferences", @"com.apple.mobilesafari"];
+    if (!bundleID || [blacklist containsObject:bundleID]) return;
+
+    // ⭐ 初始化异步日志队列
+    g_logQueue = dispatch_queue_create("com.adblock.diaglog", DISPATCH_QUEUE_SERIAL);
+    
+    g_startTime = CFAbsoluteTimeGetCurrent();
+    [[NSFileManager defaultManager] removeItemAtPath:getDiagLogPath() error:nil];
+    writeDiagLog([NSString stringWithFormat:@"🚀 GDT持续监听版已启动: %@", bundleID]);
+
+    kSkipKeywords = @[@"跳过", @"关闭", @"Skip", @"skip", @"s", @"S", @"秒"];
+
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [NSTimer scheduledTimerWithTimeInterval:0.05 repeats:YES block:^(NSTimer * _Nonnull timer) {
+            if (g_collectionEnded) { [timer invalidate]; return; }
+            radarTick();
+        }];
+    });
+}
