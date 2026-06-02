@@ -6,13 +6,13 @@
 // ==========================================
 static NSArray *kSkipKeywords = nil;
 
-// 全局调试窗口和标签
+// 全局调试层和状态
 static UIView *g_debugOverlay = nil;
 static UILabel *g_statusLabel = nil;
 static BOOL g_hasClicked = NO;
 
 // ==========================================
-// 1. 安全的悬浮提示层 (彻底抛弃 UIWindow，改用全屏 UIView 防闪退)
+// 1. 安全的悬浮提示层 (加在 keyWindow 上，防闪退)
 // ==========================================
 static void initDebugOverlay() {
     if (g_debugOverlay) return;
@@ -33,11 +33,10 @@ static void initDebugOverlay() {
         
         if (!keyWindow) return;
 
-        // 直接加在 keyWindow 的最上层，绝对安全，不会引发渲染崩溃
         g_debugOverlay = [[UIView alloc] initWithFrame:keyWindow.bounds];
         g_debugOverlay.backgroundColor = [UIColor clearColor];
-        g_debugOverlay.userInteractionEnabled = NO; // 穿透点击
-        g_debugOverlay.layer.zPosition = 99999; // 强制置顶
+        g_debugOverlay.userInteractionEnabled = NO;
+        g_debugOverlay.layer.zPosition = 99999;
         [keyWindow addSubview:g_debugOverlay];
         
         CGFloat width = keyWindow.bounds.size.width - 40;
@@ -90,13 +89,14 @@ static void drawRedCircleAtPoint(CGPoint point) {
 }
 
 // ==========================================
-// 2. 绝对安全的点击触发机制 (彻底移除 KVC 伪造 Touch，防闪退)
+// 2. 绝对安全的点击触发机制 (彻底移除 ARC 报错代码和导致闪退的私有 API)
 // ==========================================
 static void safeTriggerClick(UIView *targetView) {
     dispatch_async(dispatch_get_main_queue(), ^{
         @try {
-            // 方式A：如果是标准按钮/控件，直接发送原生点击事件 (最安全)
+            // 方式A：如果是标准按钮/控件，直接发送原生点击事件
             if ([targetView isKindOfClass:[UIControl class]]) {
+                [(UIControl *)targetView sendActionsForControlEvents:UIControlEventTouchDown];
                 [(UIControl *)targetView sendActionsForControlEvents:UIControlEventTouchUpInside];
                 return;
             }
@@ -106,35 +106,30 @@ static void safeTriggerClick(UIView *targetView) {
                 if ([targetView accessibilityActivate]) return;
             }
             
-            // 方式C：Runtime 深度挖掘手势识别器的 Target 和 Action 并直接调用
+            // 方式C：KVC 状态机欺骗法 (安全触发 UITapGestureRecognizer，无 ARC 报错)
             for (UIGestureRecognizer *gesture in targetView.gestureRecognizers) {
                 if ([gesture isKindOfClass:[UITapGestureRecognizer class]]) {
-                    Ivar targetsIvar = class_getInstanceVariable([UIGestureRecognizer class], "_targets");
-                    if (targetsIvar) {
-                        id targets = object_getIvar(gesture, targetsIvar);
-                        if ([targets isKindOfClass:NSClassFromString(@"NSPointerArray")]) {
-                            for (id targetObj in targets) {
-                                // 解析 UIGestureRecognizerTarget
-                                Ivar targetIvar = class_getInstanceVariable(NSClassFromString(@"UIGestureRecognizerTarget"), "_target");
-                                Ivar actionIvar = class_getInstanceVariable(NSClassFromString(@"UIGestureRecognizerTarget"), "_action");
-                                
-                                if (targetIvar && actionIvar) {
-                                    id realTarget = object_getIvar(targetObj, targetIvar);
-                                    SEL realAction = (SEL)object_getIvar(targetObj, actionIvar);
-                                    
-                                    if (realTarget && realAction && [realTarget respondsToSelector:realAction]) {
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-                                        [realTarget performSelector:realAction withObject:gesture];
-#pragma clang diagnostic pop
-                                        return;
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    [gesture setValue:@(UIGestureRecognizerStateEnded) forKey:@"state"];
+                    return;
                 }
             }
+            
+            // 方式D：如果当前 View 没手势，尝试向上找它的父视图
+            UIView *superView = targetView.superview;
+            while (superView) {
+                for (UIGestureRecognizer *gesture in superView.gestureRecognizers) {
+                    if ([gesture isKindOfClass:[UITapGestureRecognizer class]]) {
+                        [gesture setValue:@(UIGestureRecognizerStateEnded) forKey:@"state"];
+                        return;
+                    }
+                }
+                if ([superView isKindOfClass:[UIControl class]]) {
+                    [(UIControl *)superView sendActionsForControlEvents:UIControlEventTouchUpInside];
+                    return;
+                }
+                superView = superView.superview;
+            }
+            
         } @catch (NSException *exception) {
             NSLog(@"[AdBlocker] ⚠️ 触发点击时捕获异常: %@", exception);
         }
@@ -146,7 +141,6 @@ static void safeTriggerClick(UIView *targetView) {
 // ==========================================
 static BOOL scanAndClick(UIView *view) {
     if (!view || view.isHidden || view.alpha < 0.1) return NO;
-    // 排除我们自己创建的调试层，防止死循环
     if (view == g_debugOverlay) return NO;
 
     CGRect frameInWindow = [view convertRect:view.bounds toView:nil];
