@@ -1,5 +1,5 @@
 // ==========================================
-// Tweak.xm - 通用广告跳过雷达 (诊断+触发完整版)
+// Tweak.xm - 通用广告跳过雷达 (文件日志诊断版)
 // ==========================================
 #import <UIKit/UIKit.h>
 #import <Foundation/Foundation.h>
@@ -12,6 +12,29 @@ static UILabel *g_statusLabel = nil;
 static NSArray *kSkipKeywords = nil;
 static int g_scanCount = 0;
 static BOOL g_hasSkipped = NO;
+static NSString *const kDiagLogPath = @"/tmp/adblock_diag.log";
+
+// ==========================================
+// 📝 文件日志写入工具
+// ==========================================
+static void writeDiagLog(NSString *message) {
+    if (!message) return;
+    @try {
+        NSString *timestamp = [[NSDate date] description];
+        NSString *logEntry = [NSString stringWithFormat:@"[%@] %@\n", timestamp, message];
+        
+        NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:kDiagLogPath];
+        if (!fh) {
+            [[NSFileManager defaultManager] createFileAtPath:kDiagLogPath contents:nil attributes:nil];
+            fh = [NSFileHandle fileHandleForWritingAtPath:kDiagLogPath];
+        }
+        [fh seekToEndOfFile];
+        [fh writeData:[logEntry dataUsingEncoding:NSUTF8StringEncoding]];
+        [fh closeFile];
+    } @catch (NSException *e) {
+        // 文件写入失败时静默处理，避免影响主流程
+    }
+}
 
 // ==========================================
 // 🔬 深度交互诊断探针（仅分析，不点击）
@@ -24,35 +47,36 @@ static void diagnoseSkipButton(UIView *skipView) {
             NSString *cls = NSStringFromClass([skipView class]);
             CGRect frame = [skipView convertRect:skipView.bounds toView:nil];
             
-            NSLog(@"[AdBlocker] 🔬 ====== 开始诊断: %@ ======", cls);
-            NSLog(@"[AdBlocker] 🔬 坐标: (%.0f, %.0f, %.0f, %.0f)", 
-                  frame.origin.x, frame.origin.y, frame.size.width, frame.size.height);
-            NSLog(@"[AdBlocker] 🔬 userInteractionEnabled: %d", skipView.userInteractionEnabled);
-            NSLog(@"[AdBlocker] 🔬 hidden: %d | alpha: %.2f", skipView.isHidden, skipView.alpha);
-            NSLog(@"[AdBlocker] 🔬 isAccessibilityElement: %d", skipView.isAccessibilityElement);
-            NSLog(@"[AdBlocker] 🔬 accessibilityTraits: %lu", (unsigned long)skipView.accessibilityTraits);
-            NSLog(@"[AdBlocker] 🔬 accessibilityLabel: %@", skipView.accessibilityLabel);
-            NSLog(@"[AdBlocker] 🔬 自身手势数量: %lu", (unsigned long)skipView.gestureRecognizers.count);
+            writeDiagLog(@"====== 开始诊断 ======");
+            writeDiagLog([NSString stringWithFormat:@"类名: %@", cls]);
+            writeDiagLog([NSString stringWithFormat:@"坐标: (%.0f, %.0f, %.0f, %.0f)", 
+                          frame.origin.x, frame.origin.y, frame.size.width, frame.size.height]);
+            writeDiagLog([NSString stringWithFormat:@"userInteractionEnabled: %d", skipView.userInteractionEnabled]);
+            writeDiagLog([NSString stringWithFormat:@"hidden: %d | alpha: %.2f", skipView.isHidden, skipView.alpha]);
+            writeDiagLog([NSString stringWithFormat:@"isAccessibilityElement: %d", skipView.isAccessibilityElement]);
+            writeDiagLog([NSString stringWithFormat:@"accessibilityTraits: %lu", (unsigned long)skipView.accessibilityTraits]);
+            writeDiagLog([NSString stringWithFormat:@"accessibilityLabel: %@", skipView.accessibilityLabel]);
+            writeDiagLog([NSString stringWithFormat:@"自身手势数量: %lu", (unsigned long)skipView.gestureRecognizers.count]);
             
             for (NSInteger i = 0; i < skipView.gestureRecognizers.count; i++) {
                 UIGestureRecognizer *g = skipView.gestureRecognizers[i];
-                NSLog(@"[AdBlocker] 🔬   手势[%ld]: %@ enabled=%d state=%ld", 
-                      (long)i, NSStringFromClass([g class]), g.isEnabled, (long)g.state);
+                writeDiagLog([NSString stringWithFormat:@"  手势[%ld]: %@ enabled=%d state=%ld", 
+                              (long)i, NSStringFromClass([g class]), g.isEnabled, (long)g.state]);
             }
             
             UIView *parent = skipView.superview;
             int depth = 1;
             while (parent && depth <= 5) {
                 NSString *pCls = NSStringFromClass([parent class]);
-                NSLog(@"[AdBlocker] 🔬 父级[%d]: %@ | userInteraction=%d | 手势数=%lu | isControl=%d", 
-                      depth, pCls, parent.userInteractionEnabled, 
-                      (unsigned long)parent.gestureRecognizers.count,
-                      [parent isKindOfClass:[UIControl class]]);
+                writeDiagLog([NSString stringWithFormat:@"父级[%d]: %@ | userInteraction=%d | 手势数=%lu | isControl=%d", 
+                              depth, pCls, parent.userInteractionEnabled, 
+                              (unsigned long)parent.gestureRecognizers.count,
+                              [parent isKindOfClass:[UIControl class]]]);
                 
                 for (NSInteger i = 0; i < parent.gestureRecognizers.count; i++) {
                     UIGestureRecognizer *g = parent.gestureRecognizers[i];
-                    NSLog(@"[AdBlocker] 🔬   父级[%d]手势[%ld]: %@ enabled=%d", 
-                          depth, (long)i, NSStringFromClass([g class]), g.isEnabled);
+                    writeDiagLog([NSString stringWithFormat:@"  父级[%d]手势[%ld]: %@ enabled=%d", 
+                                  depth, (long)i, NSStringFromClass([g class]), g.isEnabled]);
                 }
                 parent = parent.superview;
                 depth++;
@@ -74,23 +98,23 @@ static void diagnoseSkipButton(UIView *skipView) {
                 NSString *hitCls = hitView ? NSStringFromClass([hitView class]) : @"nil";
                 BOOL isSelfOrChild = [skipView isDescendantOfView:hitView] || [hitView isDescendantOfView:skipView] || hitView == skipView;
                 
-                NSLog(@"[AdBlocker] 🔬 hitTest 结果: %@ | 与目标关联: %d", hitCls, isSelfOrChild);
+                writeDiagLog([NSString stringWithFormat:@"hitTest 结果: %@ | 与目标关联: %d", hitCls, isSelfOrChild]);
                 
                 if (hitView && hitView != skipView && !isSelfOrChild) {
-                    NSLog(@"[AdBlocker] 🔬 ⚠️ hitTest 命中了完全不同的视图！这可能是跳过失败的根本原因");
-                    NSLog(@"[AdBlocker] 🔬 hitView userInteraction=%d | 手势数=%lu | isControl=%d", 
-                          hitView.userInteractionEnabled, 
-                          (unsigned long)hitView.gestureRecognizers.count,
-                          [hitView isKindOfClass:[UIControl class]]);
+                    writeDiagLog(@"⚠️ hitTest 命中了完全不同的视图！这可能是跳过失败的根本原因");
+                    writeDiagLog([NSString stringWithFormat:@"hitView userInteraction=%d | 手势数=%lu | isControl=%d", 
+                                  hitView.userInteractionEnabled, 
+                                  (unsigned long)hitView.gestureRecognizers.count,
+                                  [hitView isKindOfClass:[UIControl class]]]);
                 }
             } else {
-                NSLog(@"[AdBlocker] 🔬 ⚠️ 无法获取 keyWindow，hitTest 跳过");
+                writeDiagLog(@"⚠️ 无法获取 keyWindow，hitTest 跳过");
             }
             
-            NSLog(@"[AdBlocker] 🔬 ====== 诊断结束 ======");
+            writeDiagLog(@"====== 诊断结束 ======\n");
             
         } @catch (NSException *e) {
-            NSLog(@"[AdBlocker] 🔬 ❌ 诊断异常: %@", e);
+            writeDiagLog([NSString stringWithFormat:@"❌ 诊断异常: %@", e]);
         }
     });
 }
@@ -104,20 +128,20 @@ static void forceTriggerSkip(UIView *skipView) {
     dispatch_async(dispatch_get_main_queue(), ^{
         @try {
             NSString *className = NSStringFromClass([skipView class]);
-            NSLog(@"[AdBlocker] 🚀 开始强制跳过: %@", className);
+            writeDiagLog([NSString stringWithFormat:@"🚀 开始强制跳过: %@", className]);
             
             // 1. UIControl 事件模拟
             if ([skipView isKindOfClass:[UIControl class]]) {
                 [(UIControl *)skipView sendActionsForControlEvents:UIControlEventTouchDown];
                 [(UIControl *)skipView sendActionsForControlEvents:UIControlEventTouchUpInside];
-                NSLog(@"[AdBlocker] ✅ 触发自身 UIControl");
+                writeDiagLog(@"✅ 触发自身 UIControl");
                 return;
             }
             
             // 2. 无障碍激活
             if ([skipView respondsToSelector:@selector(accessibilityActivate)]) {
                 BOOL result = [skipView accessibilityActivate];
-                NSLog(@"[AdBlocker] ✅ accessibilityActivate 结果: %d", result);
+                writeDiagLog([NSString stringWithFormat:@"✅ accessibilityActivate 结果: %d", result]);
                 if (result) return;
             }
             
@@ -128,17 +152,17 @@ static void forceTriggerSkip(UIView *skipView) {
                 for (UIGestureRecognizer *gesture in targetView.gestureRecognizers) {
                     if ([gesture isKindOfClass:[UITapGestureRecognizer class]]) {
                         [gesture setValue:@(UIGestureRecognizerStateEnded) forKey:@"state"];
-                        NSLog(@"[AdBlocker] ✅ 成功触发手势: %@ on %@", 
-                              NSStringFromClass([gesture class]), 
-                              NSStringFromClass([targetView class]));
+                        writeDiagLog([NSString stringWithFormat:@"✅ 成功触发手势: %@ on %@", 
+                                      NSStringFromClass([gesture class]), 
+                                      NSStringFromClass([targetView class])]);
                         return;
                     }
                 }
                 
                 if ([targetView isKindOfClass:[UIControl class]] && targetView != skipView) {
                     [(UIControl *)targetView sendActionsForControlEvents:UIControlEventTouchUpInside];
-                    NSLog(@"[AdBlocker] ✅ 成功触发父级 UIControl: %@", 
-                          NSStringFromClass([targetView class]));
+                    writeDiagLog([NSString stringWithFormat:@"✅ 成功触发父级 UIControl: %@", 
+                                  NSStringFromClass([targetView class])]);
                     return;
                 }
                 
@@ -162,8 +186,8 @@ static void forceTriggerSkip(UIView *skipView) {
             if (keyWindow) {
                 UIView *realHitView = [keyWindow hitTest:centerPoint withEvent:nil];
                 if (realHitView && realHitView != keyWindow && realHitView != skipView) {
-                    NSLog(@"[AdBlocker] 🎯 hitTest 命中真实视图: %@", 
-                          NSStringFromClass([realHitView class]));
+                    writeDiagLog([NSString stringWithFormat:@"🎯 hitTest 命中真实视图: %@", 
+                                  NSStringFromClass([realHitView class])]);
                     
                     if ([realHitView isKindOfClass:[UIControl class]]) {
                         [(UIControl *)realHitView sendActionsForControlEvents:UIControlEventTouchUpInside];
@@ -171,7 +195,7 @@ static void forceTriggerSkip(UIView *skipView) {
                         for (UIGestureRecognizer *g in realHitView.gestureRecognizers) {
                             if ([g isKindOfClass:[UITapGestureRecognizer class]]) {
                                 [g setValue:@(UIGestureRecognizerStateEnded) forKey:@"state"];
-                                NSLog(@"[AdBlocker] ✅ hitTest 触发了手势: %@", NSStringFromClass([g class]));
+                                writeDiagLog([NSString stringWithFormat:@"✅ hitTest 触发了手势: %@", NSStringFromClass([g class])]);
                                 break;
                             }
                         }
@@ -180,10 +204,10 @@ static void forceTriggerSkip(UIView *skipView) {
                 }
             }
             
-            NSLog(@"[AdBlocker] ⚠️ 所有触发方式均未成功: %@", className);
+            writeDiagLog([NSString stringWithFormat:@"⚠️ 所有触发方式均未成功: %@", className]);
             
         } @catch (NSException *e) {
-            NSLog(@"[AdBlocker] ❌ 跳过异常: %@", e);
+            writeDiagLog([NSString stringWithFormat:@"❌ 跳过异常: %@", e]);
         }
     });
 }
@@ -268,7 +292,7 @@ static BOOL scanAndTrigger(UIView *view) {
     if (textToCheck.length > 0 && textToCheck.length < 20) {
         for (NSString *keyword in kSkipKeywords) {
             if ([textToCheck containsString:keyword]) {
-                // 🆕 先执行诊断
+                // 先执行诊断并写入文件
                 diagnoseSkipButton(view);
                 
                 CGRect frameInWindow = [view convertRect:view.bounds toView:nil];
@@ -283,11 +307,10 @@ static BOOL scanAndTrigger(UIView *view) {
                     }
                 });
                 
-                // 延迟0.1秒确保诊断日志先输出，再执行点击
+                // 延迟0.1秒确保诊断日志先写入，再执行点击
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                     forceTriggerSkip(view);
                     
-                    // 点击后更新UI为成功状态
                     dispatch_async(dispatch_get_main_queue(), ^{
                         if (g_statusLabel) {
                             g_statusLabel.text = [NSString stringWithFormat:@"✅ 已尝试跳过！\n文字: \"%@\"", textToCheck];
@@ -355,7 +378,7 @@ static void radarTick() {
             g_statusLabel.textColor = [UIColor yellowColor];
         }
     });
-    NSLog(@"[AdBlocker] 🔄 扫描状态已重置");
+    writeDiagLog(@"🔄 扫描状态已重置");
 }
 %end
 
@@ -367,7 +390,9 @@ static void radarTick() {
     NSArray *blacklist = @[@"com.apple.springboard", @"com.apple.Preferences", @"com.apple.mobilesafari"];
     if (!bundleID || [blacklist containsObject:bundleID]) return;
 
-    NSLog(@"[AdBlocker] 🚀 通用广告跳过雷达(诊断版)已启动: %@", bundleID);
+    // 每次启动清空旧日志，避免历史数据干扰
+    [[NSFileManager defaultManager] removeItemAtPath:kDiagLogPath error:nil];
+    writeDiagLog([NSString stringWithFormat:@"🚀 通用广告跳过雷达(文件日志版)已启动: %@", bundleID]);
 
     kSkipKeywords = @[@"跳过", @"关闭", @"Skip", @"skip", @"s", @"S", @"秒"];
 
