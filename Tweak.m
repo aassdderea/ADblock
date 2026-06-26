@@ -1,239 +1,133 @@
-// ==========================================
-// Tweak.m - 通用去开屏广告插件 v2.1（编译修复版）
-// 适用于 iOS 16.x + TrollStore + Theos
-// ==========================================
-
 #import <UIKit/UIKit.h>
-#import <objc/runtime.h>
+#import <QuartzCore/QuartzCore.h>
 #import <objc/message.h>
+#import <dlfcn.h>
 
 #pragma mark - 配置常量
 
-static const NSTimeInterval kLongPressDuration   = 1.0;
-static const NSTimeInterval kHeuristicDelay      = 1.2;
-static const NSTimeInterval kLearnTimeout        = 15.0;
-static const NSTimeInterval kSimulateTouchDelay  = 0.04;
-static const CGFloat        kFloatingBtnSize     = 56.0;
-static const CGFloat        kFloatingBtnMargin   = 16.0;
-static const CGFloat        kMaxOtherWindowLevel = 100000.0;
+static NSString *const kPluginVersion = @"2.1";
+static NSString *const kToastTag = @"AdBlockToast";
+static CGFloat const kFloatingButtonSize = 44.0;
+static CGFloat const kMaxOtherWindowLevel = UIWindowLevelAlert - 1.0;
+static NSTimeInterval const kSimulateTouchDelay = 0.05;
+static NSString *const kRulesFileName = @"AdBlockRules.plist";
 
 #pragma mark - 日志宏
 
-#define ABLog(fmt, ...)  NSLog(@"[AD-BLOCK][%s] " fmt, __FUNCTION__, ##__VA_ARGS__)
-#define ABWarn(fmt, ...) NSLog(@"[AD-BLOCK][WARN][%s] " fmt, __FUNCTION__, ##__VA_ARGS__)
-
-#pragma mark - 前向声明（修复 implicit function declaration）
-
-@class ABFloatingWindow;
-static void ab_createFloatingWindow(void);
-static void ab_ensureFloatingOnTop(void);
-static void ab_startLearningMode(void);
-static void ab_stopLearningMode(BOOL success);
-static void ab_scanAndAutoSkip(void);
-static void ab_simulateTapOnView(UIView *view);
-static void ab_showToast(NSString *text, BOOL isSuccess);
-static void _ab_installUIWindowHooks(void); // ← 关键：提前声明
-static void _ab_hookKnownSDKs(void);
+#define ABLog(fmt, ...) NSLog(@"[AD-BLOCK] " fmt, ##__VA_ARGS__)
+#define ABWarn(fmt, ...) NSLog(@"[AD-BLOCK][WARN] " fmt, ##__VA_ARGS__)
 
 #pragma mark - 全局状态
 
-static ABFloatingWindow *_floatingWindow = nil;
-static UIButton         *_floatingBtn    = nil;
-static BOOL              _isLearning     = NO;
-static BOOL              _isInitialized  = NO;
-static dispatch_block_t  _learnTimeoutBlock = nil;
-static id                _activeObserver = nil; // ← 用于安全移除通知
+static UIWindow *_floatingWindow = nil;
+static UIButton *_floatingButton = nil;
+static BOOL _isLearning = NO;
+static NSMutableArray *_learningSteps = nil;
+static NSMutableDictionary *_savedRules = nil;
 
-static CGPoint           _capturedTapPoint;
+// ← 核心修复：递归保护锁
+static BOOL _isSimulatingTouch = NO;
+static BOOL _isAdjustingWindowLevel = NO;
 
-#pragma mark - 规则模型（简化版，避免 NSSecureCoding 编译问题）
-
-@interface ABRule : NSObject
-@property (nonatomic, copy) NSString *adViewClassName;
-@property (nonatomic, copy) NSString *skipBtnClassName;
-@property (nonatomic, copy) NSString *skipBtnTitle;
-@property (nonatomic, copy) NSString *skipBtnAccLabel;
-@property (nonatomic, assign) NSUInteger hitCount;
-+ (NSString *)rulesFilePath;
-+ (NSMutableArray<ABRule *> *)loadAllRules;
-+ (void)saveAllRules:(NSArray<ABRule *> *)rules;
-- (BOOL)matchesAdView:(UIView *)adView skipButton:(UIButton **)outBtn;
-@end
-
-@implementation ABRule
-
-+ (NSString *)rulesFilePath {
-    static NSString *path = nil;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
-        NSString *docDir = paths.firstObject ?: NSTemporaryDirectory();
-        path = [docDir stringByAppendingPathComponent:@"com.adblocker.rules.plist"];
-    });
-    return path;
-}
-
-+ (NSMutableArray<ABRule *> *)loadAllRules {
-    @try {
-        NSArray *raw = [NSArray arrayWithContentsOfFile:[self rulesFilePath]];
-        if (!raw) return [NSMutableArray array];
-        NSMutableArray *rules = [NSMutableArray array];
-        for (NSDictionary *dict in raw) {
-            ABRule *r = [ABRule new];
-            r.adViewClassName = dict[@"adViewClassName"];
-            r.skipBtnClassName = dict[@"skipBtnClassName"];
-            r.skipBtnTitle = dict[@"skipBtnTitle"];
-            r.skipBtnAccLabel = dict[@"skipBtnAccLabel"];
-            r.hitCount = [dict[@"hitCount"] unsignedIntegerValue];
-            [rules addObject:r];
-        }
-        return rules;
-    } @catch (NSException *e) {
-        return [NSMutableArray array];
-    }
-}
-
-+ (void)saveAllRules:(NSArray<ABRule *> *)rules {
-    @try {
-        NSMutableArray *raw = [NSMutableArray array];
-        for (ABRule *r in rules) {
-            [raw addObject:@{
-                @"adViewClassName": r.adViewClassName ?: @"",
-                @"skipBtnClassName": r.skipBtnClassName ?: @"",
-                @"skipBtnTitle": r.skipBtnTitle ?: @"",
-                @"skipBtnAccLabel": r.skipBtnAccLabel ?: @"",
-                @"hitCount": @(r.hitCount)
-            }];
-        }
-        [raw writeToFile:[self rulesFilePath] atomically:YES];
-    } @catch (NSException *e) {
-        ABWarn(@"规则保存失败: %@", e);
-    }
-}
-
-- (BOOL)matchesAdView:(UIView *)adView skipButton:(UIButton **)outBtn {
-    NSString *clsName = NSStringFromClass([adView class]);
-    BOOL match = [clsName isEqualToString:self.adViewClassName] ||
-                 [clsName hasSuffix:self.adViewClassName] ||
-                 [clsName containsString:self.adViewClassName];
-    if (!match) return NO;
-
-    UIButton *btn = [self _findSkipButtonIn:adView];
-    if (outBtn) *outBtn = btn;
-    return (btn != nil);
-}
-
-- (UIButton *)_findSkipButtonIn:(UIView *)v {
-    if ([v isKindOfClass:[UIButton class]]) {
-        UIButton *btn = (UIButton *)v;
-        NSString *title = btn.titleLabel.text ?: btn.currentTitle ?: @"";
-        NSString *acc = btn.accessibilityLabel ?: @"";
-        NSArray *kw = @[@"跳过", @"skip", @"Skip", @"关闭", @"close"];
-        for (NSString *k in kw) {
-            if ([title containsString:k] || [acc containsString:k]) return btn;
-        }
-    }
-    for (UIView *sub in v.subviews) {
-        UIButton *r = [self _findSkipButtonIn:sub];
-        if (r) return r;
-    }
-    return nil;
-}
-
-@end
-
-#pragma mark - 手势代理
-
-@interface ABGestureDelegate : NSObject
-@property (nonatomic, copy) void (^panHandler)(UIPanGestureRecognizer *);
-@property (nonatomic, copy) void (^longPressHandler)(UILongPressGestureRecognizer *);
-@property (nonatomic, copy) void (^tapHandler)(UITapGestureRecognizer *);
-@end
-
-@implementation ABGestureDelegate
-- (void)handlePan:(UIPanGestureRecognizer *)g { if (self.panHandler) self.panHandler(g); }
-- (void)handleLongPress:(UILongPressGestureRecognizer *)g { if (self.longPressHandler) self.longPressHandler(g); }
-- (void)handleTap:(UITapGestureRecognizer *)g { if (self.tapHandler) self.tapHandler(g); }
-@end
-
-#pragma mark - 悬浮窗
-
-@interface ABFloatingWindow : UIWindow
-@property (nonatomic, weak) UIButton *mainButton;
-@end
-
-@implementation ABFloatingWindow
-- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
-    if (self.mainButton) {
-        CGPoint btnPoint = [self.mainButton convertPoint:point fromView:self];
-        if ([self.mainButton pointInside:btnPoint withEvent:event]) return self.mainButton;
-    }
-    return nil; // 完全穿透
-}
-- (BOOL)_canBecomeKeyWindow { return NO; }
-@end
+// Hook 原始方法指针
+static void (*_orig_sendTouchesForEvent)(UIWindow *, SEL, NSSet *, UIEvent *) = NULL;
+static void (*_orig_setWindowLevel)(UIWindow *, SEL, CGFloat) = NULL;
+static void (*_orig_setHidden)(UIWindow *, SEL, BOOL) = NULL;
+static void (*_orig_makeKeyAndVisible)(UIWindow *, SEL) = NULL;
 
 #pragma mark - 工具函数
 
-// ← 修复：仅使用 UIWindowScene.windows，移除废弃的 [UIApplication windows]
-static UIWindow *_ab_topWindow(void) {
-    UIWindow *top = nil;
-    CGFloat maxLevel = -1;
+static NSString *_ab_rulesFilePath(void) {
+    NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
+    return [[paths firstObject] stringByAppendingPathComponent:kRulesFileName];
+}
+
+static void _ab_loadRules(void) {
     @try {
-        for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
-            if (scene.activationState != UISceneActivationStateForegroundActive) continue;
+        NSDictionary *dict = [NSDictionary dictionaryWithContentsOfFile:_ab_rulesFilePath()];
+        _savedRules = dict ? [dict mutableCopy] : [NSMutableDictionary dictionary];
+    } @catch (NSException *e) {
+        _savedRules = [NSMutableDictionary dictionary];
+    }
+}
+
+static void _ab_saveRules(void) {
+    @try {
+        [_savedRules writeToFile:_ab_rulesFilePath() atomically:YES];
+    } @catch (NSException *e) {
+        ABWarn(@"保存规则失败: %@", e);
+    }
+}
+
+static UIWindow *_ab_topWindow(void) {
+    for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
+        if (scene.activationState == UISceneActivationStateForegroundActive) {
             for (UIWindow *w in scene.windows) {
-                if (w == _floatingWindow || w.hidden || w.alpha < 0.01) continue;
-                if (w.windowLevel > maxLevel) {
-                    maxLevel = w.windowLevel;
-                    top = w;
+                if (w != _floatingWindow && !w.isHidden && w.windowLevel >= UIWindowLevelNormal) {
+                    return w;
                 }
             }
         }
-    } @catch (NSException *e) {
-        ABWarn(@"获取顶层窗口异常: %@", e);
     }
-    return top;
-}
-
-static UIButton *_ab_findSkipButton(UIView *root) {
-    if (!root) return nil;
-    if ([root isKindOfClass:[UIButton class]]) {
-        UIButton *btn = (UIButton *)root;
-        NSString *title = btn.titleLabel.text ?: btn.currentTitle ?: @"";
-        NSString *acc = btn.accessibilityLabel ?: @"";
-        NSArray *kw = @[@"跳过", @"skip", @"Skip", @"关闭", @"close"];
-        for (NSString *k in kw) {
-            if ([title containsString:k] || [acc containsString:k]) return btn;
-        }
-    }
-    for (UIView *sub in root.subviews) {
-        UIButton *r = _ab_findSkipButton(sub);
-        if (r) return r;
+    // Fallback for older scenes
+    for (UIWindow *w in [UIApplication sharedApplication].windows) {
+        if (w != _floatingWindow && !w.isHidden && w.windowLevel >= UIWindowLevelNormal) return w;
     }
     return nil;
 }
 
-static UIView *_ab_findAdContainer(UIView *fromView) {
-    CGRect screen = [UIScreen mainScreen].bounds;
-    UIView *candidate = nil;
-    UIView *cur = fromView;
-    while (cur) {
-        if (cur.frame.size.width >= screen.size.width * 0.8 &&
-            cur.frame.size.height >= screen.size.height * 0.8) {
-            candidate = cur;
-        }
-        cur = cur.superview;
-    }
-    return candidate;
+static void _ab_showToast(NSString *message) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UILabel *old = (UILabel *)[_floatingWindow viewWithTag:999];
+        [old removeFromSuperview];
+
+        UILabel *toast = [[UILabel alloc] init];
+        toast.tag = 999;
+        toast.text = message;
+        toast.textColor = [UIColor whiteColor];
+        toast.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.8];
+        toast.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium];
+        toast.textAlignment = NSTextAlignmentCenter;
+        toast.layer.cornerRadius = 8;
+        toast.clipsToBounds = YES;
+        [toast sizeToFit];
+        CGRect frame = toast.frame;
+        frame.size.width += 32;
+        frame.size.height += 16;
+
+        UIWindow *win = _floatingWindow ?: _ab_topWindow();
+        if (!win) return;
+        toast.frame = frame;
+        toast.center = CGPointMake(win.bounds.size.width / 2.0, win.bounds.size.height * 0.75);
+        [win addSubview:toast];
+
+        [UIView animateWithDuration:0.3 delay:1.5 options:0 animations:^{
+            toast.alpha = 0;
+        } completion:^(BOOL finished) {
+            [toast removeFromSuperview];
+        }];
+    });
 }
 
-#pragma mark - 触摸模拟（三级策略，修复编译错误）
+#pragma mark - 悬浮窗置顶保障
 
-// ← 修复：使用 performSelector 替代 actionsForTarget:forControlEvents:
+static void ab_ensureFloatingOnTop(void) {
+    if (!_floatingWindow || _isAdjustingWindowLevel) return;
+    _isAdjustingWindowLevel = YES;
+    @try {
+        _floatingWindow.windowLevel = UIWindowLevelAlert + 100;
+        _floatingWindow.hidden = NO;
+        if (!_floatingWindow.isKeyWindow) {
+            [_floatingWindow makeKeyAndVisible];
+        }
+    } @catch (NSException *e) {}
+    _isAdjustingWindowLevel = NO;
+}
+
+#pragma mark - 触摸模拟（三级策略，防卡死版）
+
 static BOOL _ab_tryDirectAction(UIButton *btn) {
     @try {
-        // 通过 performSelector 动态调用 UIControl 的方法
         SEL allTargetsSel = NSSelectorFromString(@"allTargets");
         SEL actionsForTargetSel = NSSelectorFromString(@"actionsForTarget:forControlEvents:");
 
@@ -241,26 +135,33 @@ static BOOL _ab_tryDirectAction(UIButton *btn) {
 
         NSSet *targets = ((NSSet *(*)(id, SEL))objc_msgSend)(btn, allTargetsSel);
         if (targets.count == 0) {
-            // 回退：sendActionsForControlEvents
-            [btn sendActionsForControlEvents:UIControlEventTouchUpInside];
+            // ← 修复：sendActionsForControlEvents 改为异步执行，避免同步重入卡死
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [btn sendActionsForControlEvents:UIControlEventTouchUpInside];
+            });
             return YES;
         }
 
         for (id target in targets) {
             if (![btn respondsToSelector:actionsForTargetSel]) continue;
+            // ← 修复：UIControlEvent → NSUInteger，解决 implicit int 编译错误
             NSArray *actions = ((NSArray *(*)(id, SEL, id, NSUInteger))objc_msgSend)(
                 btn, actionsForTargetSel, target, UIControlEventTouchUpInside);
             for (NSString *actionName in actions ?: @[]) {
                 SEL sel = NSSelectorFromString(actionName);
                 if ([target respondsToSelector:sel]) {
                     ABLog(@"策略1: 直接调用 %@ → %@", NSStringFromClass([target class]), actionName);
-                    ((void(*)(id, SEL))objc_msgSend)(target, sel);
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        ((void(*)(id, SEL))objc_msgSend)(target, sel);
+                    });
                     return YES;
                 }
             }
         }
 
-        [btn sendActionsForControlEvents:UIControlEventTouchUpInside];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [btn sendActionsForControlEvents:UIControlEventTouchUpInside];
+        });
         return YES;
     } @catch (NSException *e) {
         ABWarn(@"策略1失败: %@", e);
@@ -275,6 +176,9 @@ static void _ab_injectTouchViaSendEvent(CGPoint screenPoint) {
     CGPoint windowPoint = [targetWindow convertPoint:screenPoint fromWindow:nil];
     UIView *hitView = [targetWindow hitTest:windowPoint withEvent:nil];
     if (!hitView) hitView = targetWindow;
+
+    // ← 核心修复：设置递归保护锁
+    _isSimulatingTouch = YES;
 
     @try {
         UITouch *touch = [[UITouch alloc] init];
@@ -308,10 +212,14 @@ static void _ab_injectTouchViaSendEvent(CGPoint screenPoint) {
             [endEvent setValue:@([[NSProcessInfo processInfo] systemUptime]) forKey:@"_timestamp"];
 
             [[UIApplication sharedApplication] sendEvent:endEvent];
+
+            // ← 延迟释放锁，确保事件链完全处理完毕
+            dispatch_async(dispatch_get_main_queue(), ^{
+                _isSimulatingTouch = NO;
+            });
         });
     } @catch (NSException *e) {
         ABWarn(@"策略2失败，回退策略3: %@", e);
-        // ← 修复：touch 变量声明移到 @try 外部，此处重新创建
         UITouch *fallbackTouch = [[UITouch alloc] init];
         [fallbackTouch setValue:@(windowPoint) forKey:@"locationInWindow"];
         [fallbackTouch setValue:hitView forKey:@"view"];
@@ -322,487 +230,302 @@ static void _ab_injectTouchViaSendEvent(CGPoint screenPoint) {
                        dispatch_get_main_queue(), ^{
             [fallbackTouch setValue:@(UITouchPhaseEnded) forKey:@"phase"];
             [hitView touchesEnded:[NSSet setWithObject:fallbackTouch] withEvent:nil];
+            _isSimulatingTouch = NO;
         });
     }
 }
 
-static void ab_simulateTapOnView(UIView *view) {
+static void _ab_simulateTapOnView(UIView *view) {
     if (!view) return;
-    @autoreleasepool {
-        if ([view isKindOfClass:[UIButton class]]) {
-            if (_ab_tryDirectAction((UIButton *)view)) {
-                ABLog(@"✅ 策略1成功");
-                return;
-            }
-        }
-        CGRect frame = [view convertRect:view.bounds toView:nil];
-        CGPoint center = CGPointMake(CGRectGetMidX(frame), CGRectGetMidY(frame));
-        center.x += ((CGFloat)arc4random_uniform(400) / 100.0) - 2.0;
-        center.y += ((CGFloat)arc4random_uniform(400) / 100.0) - 2.0;
-        _ab_injectTouchViaSendEvent(center);
-    }
-}
+    CGPoint center = [view.superview convertPoint:view.center toView:nil];
 
-#pragma mark - 已知 SDK Hook
-
-static BOOL _knownSDKHooked = NO;
-
-static IMP _ab_replaceMethod(Class cls, SEL sel, id block) {
-    Method m = class_getInstanceMethod(cls, sel);
-    if (!m) return NULL;
-    IMP newImp = imp_implementationWithBlock(block);
-    return method_setImplementation(m, newImp);
-}
-
-static void _ab_hookKnownSDKs(void) {
-    if (_knownSDKHooked) return;
-    _knownSDKHooked = YES;
-
-    Class c;
-    c = NSClassFromString(@"BUSplashAdView");
-    if (c) {
-        _ab_replaceMethod(c, @selector(showInWindow:), ^void(id self, UIWindow *w) {
-            id delegate = [self valueForKey:@"delegate"];
-            SEL closeSel = NSSelectorFromString(@"splashAdDidClose:");
-            if (delegate && [delegate respondsToSelector:closeSel])
-                ((void(*)(id, SEL, id))objc_msgSend)(delegate, closeSel, self);
-        });
+    // 优先尝试直接调用 Target-Action
+    if ([view isKindOfClass:[UIButton class]]) {
+        if (_ab_tryDirectAction((UIButton *)view)) return;
     }
 
-    c = NSClassFromString(@"GDTSplashAd");
-    if (c) {
-        _ab_replaceMethod(c, @selector(loadAndShowInWindow:), ^void(id self, UIWindow *w) {
-            id delegate = [self valueForKey:@"delegate"];
-            SEL dismissSel = NSSelectorFromString(@"splashAdDidDismiss:");
-            if (delegate && [delegate respondsToSelector:dismissSel])
-                ((void(*)(id, SEL, id))objc_msgSend)(delegate, dismissSel, self);
-        });
-    }
-
-    c = NSClassFromString(@"BaiduMobAdSplash");
-    if (c) {
-        _ab_replaceMethod(c, @selector(showInWindow:), ^void(id self, UIWindow *w) {
-            id delegate = [self valueForKey:@"delegate"];
-            SEL closeSel = NSSelectorFromString(@"splashAdDidClose:");
-            if (delegate && [delegate respondsToSelector:closeSel])
-                ((void(*)(id, SEL, id))objc_msgSend)(delegate, closeSel, self);
-        });
-    }
+    // 回退到触摸注入
+    _ab_injectTouchViaSendEvent(center);
 }
 
-#pragma mark - 悬浮窗管理
-
-static ABGestureDelegate *_gestureDelegate = nil;
-
-static void ab_createFloatingWindow(void) {
-    if (_floatingWindow) return;
-    dispatch_async(dispatch_get_main_queue(), ^{
-        if (_floatingWindow) return;
-
-        _floatingWindow = [[ABFloatingWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
-        for (UIWindowScene *sc in [UIApplication sharedApplication].connectedScenes) {
-            if (sc.activationState == UISceneActivationStateForegroundActive) {
-                _floatingWindow.windowScene = sc;
-                break;
-            }
-        }
-        if (!_floatingWindow.windowScene) {
-            for (UIWindowScene *sc in [UIApplication sharedApplication].connectedScenes) {
-                _floatingWindow.windowScene = sc;
-                break;
-            }
-        }
-
-        _floatingWindow.backgroundColor = [UIColor clearColor];
-        _floatingWindow.rootViewController = [UIViewController new];
-        _floatingWindow.rootViewController.view.backgroundColor = [UIColor clearColor];
-
-        CGFloat s = kFloatingBtnSize;
-        UIButton *btn = [UIButton buttonWithType:UIButtonTypeCustom];
-        btn.frame = CGRectMake([UIScreen mainScreen].bounds.size.width - s - kFloatingBtnMargin, 120, s, s);
-        btn.backgroundColor = [[UIColor systemRedColor] colorWithAlphaComponent:0.9];
-        btn.layer.cornerRadius = s / 2.0;
-        btn.layer.borderWidth = 2.5;
-        btn.layer.borderColor = [UIColor whiteColor].CGColor;
-        btn.titleLabel.font = [UIFont boldSystemFontOfSize:12];
-        [btn setTitle:@"去广告" forState:UIControlStateNormal];
-        [btn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-
-        // ← 修复：删除了 addTarget:nil action:NULL 的无效占位代码
-
-        _gestureDelegate = [ABGestureDelegate new];
-
-        UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc]
-                                         initWithTarget:_gestureDelegate action:@selector(handleTap:)];
-        _gestureDelegate.tapHandler = ^(UITapGestureRecognizer *g) {
-            if (_isLearning) return;
-            ab_scanAndAutoSkip();
-        };
-        [btn addGestureRecognizer:tap];
-
-        UILongPressGestureRecognizer *lp = [[UILongPressGestureRecognizer alloc]
-                                             initWithTarget:_gestureDelegate action:@selector(handleLongPress:)];
-        lp.minimumPressDuration = kLongPressDuration;
-        lp.allowableMovement = 15;
-        _gestureDelegate.longPressHandler = ^(UILongPressGestureRecognizer *g) {
-            if (g.state == UIGestureRecognizerStateBegan && !_isLearning)
-                ab_startLearningMode();
-        };
-        [btn addGestureRecognizer:lp];
-
-        UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc]
-                                        initWithTarget:_gestureDelegate action:@selector(handlePan:)];
-        _gestureDelegate.panHandler = ^(UIPanGestureRecognizer *g) {
-            static CGPoint startOffset;
-            if (g.state == UIGestureRecognizerStateBegan) {
-                startOffset = [g locationInView:btn];
-            } else if (g.state == UIGestureRecognizerStateChanged) {
-                CGPoint p = [g locationInView:_floatingWindow];
-                btn.center = CGPointMake(p.x - startOffset.x + s/2, p.y - startOffset.y + s/2);
-            }
-        };
-        [btn addGestureRecognizer:pan];
-
-        [_floatingWindow.rootViewController.view addSubview:btn];
-        _floatingWindow.mainButton = btn;
-        _floatingBtn = btn;
-
-        ab_ensureFloatingOnTop();
-        _floatingWindow.hidden = NO;
-        ABLog(@"🔴 悬浮窗已创建");
-    });
-}
-
-static void ab_ensureFloatingOnTop(void) {
-    if (!_floatingWindow) return;
-    static BOOL _isAdjusting = NO;
-    if (_isAdjusting) return;
-    _isAdjusting = YES;
-
-    if (!_isLearning) {
-        CGFloat maxLevel = 0;
-        @try {
-            for (UIWindowScene *sc in [UIApplication sharedApplication].connectedScenes) {
-                for (UIWindow *w in sc.windows) {
-                    if (w != _floatingWindow && !w.hidden)
-                        maxLevel = MAX(maxLevel, w.windowLevel);
-                }
-            }
-        } @catch (NSException *e) {}
-        CGFloat desired = MAX(maxLevel + 1.0, kMaxOtherWindowLevel + 1.0);
-        if (_floatingWindow.windowLevel != desired)
-            _floatingWindow.windowLevel = desired;
-    }
-    _floatingWindow.hidden = NO;
-    _floatingWindow.alpha = 1.0;
-    _isAdjusting = NO;
-}
-
-#pragma mark - 学习模式
-
-static void ab_startLearningMode(void) {
-    if (_isLearning) return;
-    _isLearning = YES;
-
-    dispatch_async(dispatch_get_main_queue(), ^{
-        [_floatingBtn setTitle:@"学习中" forState:UIControlStateNormal];
-        _floatingBtn.backgroundColor = [[UIColor systemBlueColor] colorWithAlphaComponent:0.9];
-        _floatingWindow.windowLevel = kMaxOtherWindowLevel - 1.0;
-
-        CABasicAnimation *pulse = [CABasicAnimation animationWithKeyPath:@"transform.scale"];
-        pulse.fromValue = @(1.0); pulse.toValue = @(1.15);
-        pulse.duration = 0.6; pulse.autoreverses = YES; pulse.repeatCount = HUGE_VAL;
-        [_floatingBtn.layer addAnimation:pulse forKey:@"learnPulse"];
-
-        ab_showToast(@"📖 学习模式\n请点击「跳过」按钮", YES);
-
-        _learnTimeoutBlock = ^{ ab_stopLearningMode(NO); };
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(kLearnTimeout * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), _learnTimeoutBlock);
-    });
-}
-
-static void ab_stopLearningMode(BOOL success) {
-    if (!_isLearning) return;
-    _isLearning = NO;
-    _learnTimeoutBlock = nil;
-
-    dispatch_async(dispatch_get_main_queue(), ^{
-        [_floatingBtn setTitle:@"去广告" forState:UIControlStateNormal];
-        _floatingBtn.backgroundColor = [[UIColor systemRedColor] colorWithAlphaComponent:0.9];
-        [_floatingBtn.layer removeAnimationForKey:@"learnPulse"];
-        ab_ensureFloatingOnTop();
-    });
-}
+#pragma mark - 学习模式捕获
 
 static void _ab_handleLearningCapture(UITouch *touch, UIEvent *event) {
-    if (!_isLearning || touch.phase != UITouchPhaseEnded || touch.tapCount != 1) return;
-    if (touch.window == _floatingWindow) return;
+    if (!_isLearning || !touch) return;
 
-    CGPoint screenPoint = [touch locationInView:nil];
-    _capturedTapPoint = screenPoint;
+    UIView *view = touch.view;
+    if (!view || view == _floatingWindow || [view isDescendantOfView:_floatingWindow]) return;
 
-    dispatch_async(dispatch_get_main_queue(), ^{
-        _learnTimeoutBlock = nil;
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{
-            UIWindow *topWin = _ab_topWindow();
-            if (!topWin) { ab_stopLearningMode(NO); return; }
+    NSMutableDictionary *step = [NSMutableDictionary dictionary];
+    step[@"className"] = NSStringFromClass([view class]);
+    step[@"frame"] = NSStringFromCGRect(view.frame);
+    step[@"tag"] = @(view.tag);
 
-            CGPoint wp = [topWin convertPoint:screenPoint fromWindow:nil];
-            UIView *hitView = [topWin hitTest:wp withEvent:nil];
+    // 尝试获取 accessibilityIdentifier
+    if (view.accessibilityIdentifier.length > 0) {
+        step[@"accessibilityId"] = view.accessibilityIdentifier;
+    }
 
-            UIButton *skipBtn = nil;
-            UIView *cur = hitView;
-            while (cur) {
-                if ([cur isKindOfClass:[UIButton class]]) { skipBtn = (UIButton *)cur; break; }
-                cur = cur.superview;
-            }
+    // 尝试获取按钮标题
+    if ([view isKindOfClass:[UIButton class]]) {
+        UIButton *btn = (UIButton *)view;
+        step[@"buttonTitle"] = [btn titleForState:UIControlStateNormal] ?: @"";
+    }
 
-            // ← 修复：删除了未使用的 targets 变量和未完成的手势检测代码
-
-            if (!skipBtn) {
-                ab_stopLearningMode(NO);
-                ab_showToast(@"❌ 未找到跳过按钮", NO);
-                return;
-            }
-
-            NSString *title = skipBtn.titleLabel.text ?: skipBtn.currentTitle ?: @"";
-            NSString *acc = skipBtn.accessibilityLabel ?: @"";
-            BOOL isSkip = NO;
-            for (NSString *kw in @[@"跳过", @"skip", @"Skip", @"关闭", @"close"]) {
-                if ([title containsString:kw] || [acc containsString:kw]) { isSkip = YES; break; }
-            }
-            if (!isSkip) { ab_stopLearningMode(NO); return; }
-
-            UIView *container = _ab_findAdContainer(skipBtn);
-            NSString *adClass = container ? NSStringFromClass([container class]) : NSStringFromClass([skipBtn.superview class]);
-
-            ABRule *rule = [ABRule new];
-            rule.adViewClassName = adClass;
-            rule.skipBtnClassName = NSStringFromClass([skipBtn class]);
-            rule.skipBtnTitle = title;
-            rule.skipBtnAccLabel = acc;
-            rule.hitCount = 0;
-
-            NSMutableArray *rules = [ABRule loadAllRules];
-            BOOL dup = NO;
-            for (ABRule *ex in rules) {
-                if ([ex.adViewClassName isEqualToString:adClass]) { ex.hitCount++; dup = YES; break; }
-            }
-            if (!dup) [rules addObject:rule];
-            [ABRule saveAllRules:rules];
-
-            ab_stopLearningMode(YES);
-            ab_showToast(@"✅ 规则已保存!", YES);
-        });
-    });
+    [_learningSteps addObject:step];
+    ABLog(@"学习模式捕获: %@ tag=%ld", step[@"className"], (long)view.tag);
+    _ab_showToast([NSString stringWithFormat:@"📝 已记录步骤 %lu", (unsigned long)_learningSteps.count]);
 }
 
-#pragma mark - 自动扫描
-
-static void ab_scanAndAutoSkip(void) {
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(kHeuristicDelay * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
-        UIWindow *top = _ab_topWindow();
-        if (!top) { ab_showToast(@"⚠️ 未找到广告窗口", NO); return; }
-
-        UIView *rootView = top.rootViewController.view ?: top;
-        BOOL skipped = NO;
-
-        for (ABRule *rule in [ABRule loadAllRules]) {
-            UIButton *btn = nil;
-            if ([rule matchesAdView:rootView skipButton:&btn]) {
-                ab_simulateTapOnView(btn);
-                rule.hitCount++;
-                skipped = YES;
-                break;
-            }
-            for (UIView *sub in rootView.subviews) {
-                if ([rule matchesAdView:sub skipButton:&btn]) {
-                    ab_simulateTapOnView(btn);
-                    rule.hitCount++;
-                    skipped = YES;
-                    break;
-                }
-            }
-            if (skipped) break;
-        }
-
-        if (!skipped) {
-            UIButton *btn = _ab_findSkipButton(rootView);
-            if (btn) { ab_simulateTapOnView(btn); skipped = YES; }
-        }
-
-        if (skipped) {
-            ab_showToast(@"✅ 广告已跳过", YES);
-        } else {
-            ab_showToast(@"❌ 未发现广告", NO);
-        }
-    });
-}
-
-#pragma mark - Toast
-
-static void ab_showToast(NSString *text, BOOL isSuccess) {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        if (!_floatingWindow) return;
-        UILabel *label = [[UILabel alloc] init];
-        label.text = text;
-        label.numberOfLines = 0;
-        label.textColor = [UIColor whiteColor];
-        label.backgroundColor = isSuccess
-            ? [[UIColor systemGreenColor] colorWithAlphaComponent:0.85]
-            : [[UIColor systemGrayColor] colorWithAlphaComponent:0.85];
-        label.textAlignment = NSTextAlignmentCenter;
-        label.font = [UIFont systemFontOfSize:14 weight:UIFontWeightMedium];
-        label.layer.cornerRadius = 12;
-        label.layer.masksToBounds = YES;
-
-        CGFloat maxWidth = [UIScreen mainScreen].bounds.size.width - 60;
-        CGSize size = [text boundingRectWithSize:CGSizeMake(maxWidth, CGFLOAT_MAX)
-                                         options:NSStringDrawingUsesLineFragmentOrigin
-                                      attributes:@{NSFontAttributeName: label.font}
-                                         context:nil].size;
-        label.frame = CGRectMake(0, 0, MIN(size.width + 30, maxWidth), size.height + 20);
-        label.center = CGPointMake(_floatingWindow.bounds.size.width / 2,
-                                    _floatingWindow.bounds.size.height - 120);
-        [_floatingWindow.rootViewController.view addSubview:label];
-        label.alpha = 0;
-        [UIView animateWithDuration:0.3 animations:^{ label.alpha = 1; }
-                         completion:^(BOOL f) {
-            [UIView animateWithDuration:0.3 delay:2.0 options:0 animations:^{ label.alpha = 0; }
-                             completion:^(BOOL f2) { [label removeFromSuperview]; }];
-        }];
-    });
-}
-
-#pragma mark - UIWindow Hooks
-
-static void (*_orig_sendTouchesForEvent)(id, SEL, NSSet *, UIEvent *) = NULL;
-static void (*_orig_setWindowLevel)(id, SEL, CGFloat) = NULL;
-static void (*_orig_setHidden)(id, SEL, BOOL) = NULL;
-static void (*_orig_makeKeyAndVisible)(id, SEL) = NULL;
+#pragma mark - UIWindow Hooks（带递归保护）
 
 static void _hooked_sendTouchesForEvent(UIWindow *self, SEL _cmd, NSSet *touches, UIEvent *event) {
+    // ← 核心修复：模拟触摸期间直接透传，不做任何拦截
+    if (_isSimulatingTouch) {
+        if (_orig_sendTouchesForEvent) _orig_sendTouchesForEvent(self, _cmd, touches, event);
+        return;
+    }
+
     if (_orig_sendTouchesForEvent) _orig_sendTouchesForEvent(self, _cmd, touches, event);
+
     @try {
         if (_isLearning) {
             for (UITouch *touch in touches) {
-                if (touch.window == _floatingWindow) continue;
-                _ab_handleLearningCapture(touch, event);
-                break;
+                if (touch.phase == UITouchPhaseBegan && touch.window != _floatingWindow) {
+                    _ab_handleLearningCapture(touch, event);
+                    break;
+                }
             }
         }
     } @catch (NSException *e) {}
 }
 
-static BOOL _isInWindowLevelHook = NO;
 static void _hooked_setWindowLevel(UIWindow *self, SEL _cmd, CGFloat level) {
-    if (_isInWindowLevelHook) {
+    // ← 核心修复：防止 Window Level 调整触发递归
+    if (_isAdjustingWindowLevel) {
         if (_orig_setWindowLevel) _orig_setWindowLevel(self, _cmd, level);
         return;
     }
-    _isInWindowLevelHook = YES;
-    if (self != _floatingWindow && level > kMaxOtherWindowLevel) level = kMaxOtherWindowLevel;
-    if (_orig_setWindowLevel) _orig_setWindowLevel(self, _cmd, level);
-    if (self != _floatingWindow && !_isLearning) {
-        dispatch_async(dispatch_get_main_queue(), ^{ ab_ensureFloatingOnTop(); });
+
+    _isAdjustingWindowLevel = YES;
+
+    if (self != _floatingWindow && level > kMaxOtherWindowLevel) {
+        level = kMaxOtherWindowLevel;
     }
-    _isInWindowLevelHook = NO;
+    if (_orig_setWindowLevel) _orig_setWindowLevel(self, _cmd, level);
+
+    if (self != _floatingWindow && !_isLearning && !_isSimulatingTouch) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            ab_ensureFloatingOnTop();
+        });
+    }
+
+    _isAdjustingWindowLevel = NO;
 }
 
 static void _hooked_setHidden(UIWindow *self, SEL _cmd, BOOL hidden) {
-    if (self == _floatingWindow && hidden) return;
     if (_orig_setHidden) _orig_setHidden(self, _cmd, hidden);
+    if (self == _floatingWindow && hidden && !_isLearning) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            ab_ensureFloatingOnTop();
+        });
+    }
 }
 
 static void _hooked_makeKeyAndVisible(UIWindow *self, SEL _cmd) {
     if (_orig_makeKeyAndVisible) _orig_makeKeyAndVisible(self, _cmd);
-    if (self != _floatingWindow && !_isLearning) {
-        dispatch_async(dispatch_get_main_queue(), ^{ ab_ensureFloatingOnTop(); });
+    // ← 修复：模拟触摸期间不触发置顶
+    if (self != _floatingWindow && !_isLearning && !_isSimulatingTouch) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            ab_ensureFloatingOnTop();
+        });
     }
 }
 
-// ← 修复：函数定义在前向声明之后，不再报 implicit declaration
+#pragma mark - Hook 安装
+
 static void _ab_installUIWindowHooks(void) {
-    static BOOL hooksInstalled = NO;
-    if (hooksInstalled) return;
-    hooksInstalled = YES;
+    Class cls = [UIWindow class];
 
-    Class winClass = [UIWindow class];
-
-    SEL sendSel = NSSelectorFromString(@"_sendTouchesForEvent:");
-    Method sendMethod = class_getInstanceMethod(winClass, sendSel);
-    if (sendMethod) {
-        IMP newImp = imp_implementationWithBlock(^(UIWindow *self, NSSet *touches, UIEvent *event) {
-            _hooked_sendTouchesForEvent(self, sendSel, touches, event);
-        });
-        _orig_sendTouchesForEvent = (void(*)(id,SEL,NSSet*,UIEvent*))method_setImplementation(sendMethod, newImp);
+    Method m1 = class_getInstanceMethod(cls, @selector(sendTouchesForEvent:));
+    if (m1) {
+        _orig_sendTouchesForEvent = (void (*)(UIWindow *, SEL, NSSet *, UIEvent *))method_getImplementation(m1);
+        method_setImplementation(m1, (IMP)_hooked_sendTouchesForEvent);
     }
 
-    Method levelMethod = class_getInstanceMethod(winClass, @selector(setWindowLevel:));
-    if (levelMethod) {
-        IMP newImp = imp_implementationWithBlock(^(UIWindow *self, CGFloat level) {
-            _hooked_setWindowLevel(self, @selector(setWindowLevel:), level);
-        });
-        _orig_setWindowLevel = (void(*)(id,SEL,CGFloat))method_setImplementation(levelMethod, newImp);
+    Method m2 = class_getInstanceMethod(cls, @selector(setWindowLevel:));
+    if (m2) {
+        _orig_setWindowLevel = (void (*)(UIWindow *, SEL, CGFloat))method_getImplementation(m2);
+        method_setImplementation(m2, (IMP)_hooked_setWindowLevel);
     }
 
-    Method hiddenMethod = class_getInstanceMethod(winClass, @selector(setHidden:));
-    if (hiddenMethod) {
-        IMP newImp = imp_implementationWithBlock(^(UIWindow *self, BOOL hidden) {
-            _hooked_setHidden(self, @selector(setHidden:), hidden);
-        });
-        _orig_setHidden = (void(*)(id,SEL,BOOL))method_setImplementation(hiddenMethod, newImp);
+    Method m3 = class_getInstanceMethod(cls, @selector(setHidden:));
+    if (m3) {
+        _orig_setHidden = (void (*)(UIWindow *, SEL, BOOL))method_getImplementation(m3);
+        method_setImplementation(m3, (IMP)_hooked_setHidden);
     }
 
-    Method visibleMethod = class_getInstanceMethod(winClass, @selector(makeKeyAndVisible));
-    if (visibleMethod) {
-        IMP newImp = imp_implementationWithBlock(^(UIWindow *self) {
-            _hooked_makeKeyAndVisible(self, @selector(makeKeyAndVisible));
-        });
-        _orig_makeKeyAndVisible = (void(*)(id,SEL))method_setImplementation(visibleMethod, newImp);
+    Method m4 = class_getInstanceMethod(cls, @selector(makeKeyAndVisible));
+    if (m4) {
+        _orig_makeKeyAndVisible = (void (*)(UIWindow *, SEL))method_getImplementation(m4);
+        method_setImplementation(m4, (IMP)_hooked_makeKeyAndVisible);
     }
 
     ABLog(@"✅ UIWindow Hooks 安装完成");
 }
 
-#pragma mark - 初始化
+#pragma mark - 悬浮窗 UI 构建
+
+static void _ab_createFloatingUI(void) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (_floatingWindow) return;
+
+        _floatingWindow = [[UIWindow alloc] initWithFrame:CGRectMake(0, 0, kFloatingButtonSize, kFloatingButtonSize)];
+        _floatingWindow.windowLevel = UIWindowLevelAlert + 100;
+        _floatingWindow.backgroundColor = [UIColor clearColor];
+        _floatingWindow.layer.cornerRadius = kFloatingButtonSize / 2.0;
+        _floatingWindow.clipsToBounds = YES;
+
+        // 适配 Scene
+        for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
+            if (scene.activationState == UISceneActivationStateForegroundActive) {
+                _floatingWindow.windowScene = scene;
+                break;
+            }
+        }
+
+        _floatingButton = [UIButton buttonWithType:UIButtonTypeSystem];
+        _floatingButton.frame = _floatingWindow.bounds;
+        _floatingButton.backgroundColor = [[UIColor systemRedColor] colorWithAlphaComponent:0.9];
+        [_floatingButton setTitle:@"去广告" forState:UIControlStateNormal];
+        [_floatingButton setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+        _floatingButton.titleLabel.font = [UIFont systemFontOfSize:11 weight:UIFontWeightBold];
+        _floatingButton.layer.cornerRadius = kFloatingButtonSize / 2.0;
+
+        // 短按：执行去广告 / 长按：切换学习模式
+        UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:nil action:nil];
+        tap.numberOfTapsRequired = 1;
+        [_floatingButton addGestureRecognizer:tap];
+
+        UILongPressGestureRecognizer *longPress = [[UILongPressGestureRecognizer alloc] initWithTarget:nil action:nil];
+        longPress.minimumPressDuration = 0.8;
+        [_floatingButton addGestureRecognizer:longPress];
+
+        // 使用 block-based gesture handler 避免 target-action 重入问题
+        tap.handler = ^(UITapGestureRecognizer *g) {
+            if (_isLearning) {
+                // 学习模式下点击 = 保存当前学习结果
+                if (_learningSteps.count > 0) {
+                    NSString *bundleId = [[NSBundle mainBundle] bundleIdentifier];
+                    _savedRules[bundleId] = [_learningSteps copy];
+                    _ab_saveRules();
+                    _ab_showToast([NSString stringWithFormat:@"✅ 已保存 %lu 条规则", (unsigned long)_learningSteps.count]);
+                } else {
+                    _ab_showToast(@"⚠️ 未捕获到任何步骤");
+                }
+                _isLearning = NO;
+                [_floatingButton setTitle:@"去广告" forState:UIControlStateNormal];
+                _floatingButton.backgroundColor = [[UIColor systemRedColor] colorWithAlphaComponent:0.9];
+                _learningSteps = nil;
+            } else {
+                // 正常模式：执行已保存的规则
+                NSString *bundleId = [[NSBundle mainBundle] bundleIdentifier];
+                NSArray *rules = _savedRules[bundleId];
+                if (rules.count == 0) {
+                    _ab_showToast(@"💡 长按按钮进入学习模式录制规则");
+                    return;
+                }
+                ABLog(@"执行 %lu 条规则", (unsigned long)rules.count);
+                for (NSDictionary *step in rules) {
+                    UIWindow *win = _ab_topWindow();
+                    if (!win) break;
+                    // 通过 className + tag 定位视图
+                    NSString *clsName = step[@"className"];
+                    NSInteger tag = [step[@"tag"] integerValue];
+                    Class cls = NSClassFromString(clsName);
+                    if (!cls) continue;
+
+                    __block UIView *target = nil;
+                    // 深度搜索匹配视图
+                    NSMutableArray *queue = [NSMutableArray arrayWithObject:win.rootViewController.view];
+                    while (queue.count > 0 && !target) {
+                        UIView *v = queue.firstObject;
+                        [queue removeObjectAtIndex:0];
+                        if ([v isKindOfClass:cls] && v.tag == tag) {
+                            target = v;
+                            break;
+                        }
+                        for (UIView *sub in v.subviews) [queue addObject:sub];
+                    }
+
+                    if (target && !target.isHidden && target.alpha > 0.01) {
+                        _ab_simulateTapOnView(target);
+                        ABLog(@"命中规则: %@ tag=%ld", clsName, (long)tag);
+                    }
+                }
+                _ab_showToast(@"✅ 规则执行完成");
+            }
+        };
+
+        longPress.handler = ^(UILongPressGestureRecognizer *g) {
+            if (g.state != UIGestureRecognizerStateBegan) return;
+            _isLearning = !_isLearning;
+            if (_isLearning) {
+                _learningSteps = [NSMutableArray array];
+                [_floatingButton setTitle:@"学习中" forState:UIControlStateNormal];
+                _floatingButton.backgroundColor = [[UIColor systemOrangeColor] colorWithAlphaComponent:0.9];
+                _ab_showToast(@"📖 学习模式已开启，请点击跳过按钮");
+
+                // 学习模式脉冲动画
+                CABasicAnimation *pulse = [CABasicAnimation animationWithKeyPath:@"transform.scale"];
+                pulse.fromValue = @(1.0);
+                pulse.toValue = @(1.15);
+                pulse.duration = 0.6;
+                pulse.autoreverses = YES;
+                pulse.repeatCount = HUGE_VALF;
+                [_floatingButton.layer addAnimation:pulse forKey:@"learningPulse"];
+            } else {
+                [_floatingButton setTitle:@"去广告" forState:UIControlStateNormal];
+                _floatingButton.backgroundColor = [[UIColor systemRedColor] colorWithAlphaComponent:0.9];
+                [_floatingButton.layer removeAnimationForKey:@"learningPulse"];
+                _learningSteps = nil;
+                _ab_showToast(@"📖 学习模式已关闭");
+            }
+        };
+
+        // 拖拽手势
+        UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:nil action:nil];
+        pan.handler = ^(UIPanGestureRecognizer *g) {
+            CGPoint translation = [g translationInView:_floatingWindow.superview ?: g.view];
+            CGRect frame = _floatingWindow.frame;
+            frame.origin.x += translation.x;
+            frame.origin.y += translation.y;
+            _floatingWindow.frame = frame;
+            [g setTranslation:CGPointZero inView:g.view];
+        };
+        [_floatingButton addGestureRecognizer:pan];
+
+        [_floatingWindow addSubview:_floatingButton];
+        [_floatingWindow makeKeyAndVisible];
+
+        ABLog(@"✅ 悬浮窗创建完成");
+    });
+}
+
+#pragma mark - Constructor (TrollFools dyld 自动调用)
 
 __attribute__((constructor))
 static void _adblock_init(void) {
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        _ab_hookKnownSDKs();
+    @autoreleasepool {
+        ABLog(@"🚀 AdBlock v%@ 初始化...", kPluginVersion);
 
-        // ← 修复：保存 observer 引用以便安全移除
-        _activeObserver = [[NSNotificationCenter defaultCenter]
-            addObserverForName:UIApplicationDidBecomeActiveNotification
-            object:nil queue:[NSOperationQueue mainQueue]
-            usingBlock:^(NSNotification *note) {
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
-                               dispatch_get_main_queue(), ^{
-                    if (!_isInitialized) {
-                        _isInitialized = YES;
-                        _ab_installUIWindowHooks();
-                        ab_createFloatingWindow();
-                        ab_showToast(@"✅ AdBlock v2.1 已加载", YES);
-                    } else {
-                        ab_scanAndAutoSkip();
-                    }
-                });
-            }];
+        _ab_loadRules();
+        _ab_installUIWindowHooks();
 
-        // ← 修复：使用具体 observer 对象移除，而非 nil
-        [[NSNotificationCenter defaultCenter]
-            addObserverForName:UIApplicationWillTerminateNotification
-            object:nil queue:[NSOperationQueue mainQueue]
-            usingBlock:^(NSNotification *note) {
-                if (_activeObserver) {
-                    [[NSNotificationCenter defaultCenter] removeObserver:_activeObserver];
-                    _activeObserver = nil;
-                }
-            }];
-    });
+        // 延迟创建 UI，等待 App 的 Window 就绪
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            _ab_createFloatingUI();
+            _ab_showToast([NSString stringWithFormat:@"✅ AdBlock v%@ 已加载", kPluginVersion]);
+        });
+    }
 }
