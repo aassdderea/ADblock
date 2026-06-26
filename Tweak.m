@@ -1,5 +1,5 @@
 // ==========================================
-// Tweak.m - 通用去开屏广告插件（KeyWindow抢夺终结版）
+// Tweak.m - 通用去开屏广告插件（终极修复版）
 // 适用于 iOS 16.6 + TrollStore
 // ==========================================
 
@@ -14,7 +14,6 @@
 
 #define TESTLOG(fmt, ...) NSLog(@"[AD-BLOCKER] " fmt, ##__VA_ARGS__)
 
-// 前向声明
 @class _FloatingWindow;
 static void startLearningMode(void);
 static void stopLearningMode(void);
@@ -39,7 +38,6 @@ static void createFloatingWindow(void);
 - (void)handleLongPress:(UILongPressGestureRecognizer *)g { if(self.longPressBlock) self.longPressBlock(g); }
 @end
 
-// 允许成为 key window 的悬浮窗
 @interface _FloatingWindow : UIWindow
 @property (nonatomic, weak) UIButton *actionButton;
 @end
@@ -47,9 +45,8 @@ static void createFloatingWindow(void);
 - (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
     if (self.actionButton && CGRectContainsPoint(self.actionButton.frame, point))
         return self.actionButton;
-    return nil; // 穿透
+    return nil;
 }
-// 关键：允许成为 key window
 - (BOOL)_canBecomeKeyWindow { return YES; }
 @end
 
@@ -128,6 +125,7 @@ static void addRule(NSString *adClass, NSString *btnClass, NSString *titleKeywor
     for(NSDictionary *r in rules) if([r[@"adViewClass"] isEqualToString:adClass]) return;
     [rules addObject:@{@"adViewClass":adClass, @"skipBtnClass":btnClass?:@"", @"skipBtnTitle":titleKeyword?:@"", @"skipBtnAccLabel":accLabel?:@""}];
     saveRules(rules);
+    TESTLOG(@"✅ 规则已保存: ad=%@ btn=%@ title=%@", adClass, btnClass, titleKeyword);
 }
 static BOOL tryAutoSkipWithRules(UIView *adView) {
     NSArray *rules = loadRules();
@@ -165,25 +163,72 @@ static void startLearningMode() {
     if(learningMode) return; learningMode=YES; learnRecorded=NO;
     [floatingBtn setTitle:@"学习中" forState:UIControlStateNormal]; floatingBtn.backgroundColor=[UIColor blueColor];
     [learnTimeout invalidate]; learnTimeout = [NSTimer scheduledTimerWithTimeInterval:LEARN_TIMEOUT repeats:NO block:^(NSTimer *_){ stopLearningMode(); }];
+    TESTLOG(@"📖 学习模式启动，请点击广告的跳过按钮");
 }
 static void stopLearningMode() {
     if(!learningMode) return; learningMode=NO; [learnTimeout invalidate]; learnTimeout=nil;
     [floatingBtn setTitle:@"去广告" forState:UIControlStateNormal]; floatingBtn.backgroundColor=[UIColor redColor];
     ensureFloatingOnTop();
+    TESTLOG(@"📖 学习模式已退出");
 }
 
-// ========== 核心：强夺 key window ==========
+// ========== 核心：强夺 key window + 恢复 scene 和 frame ==========
 static void ensureFloatingOnTop(void) {
     if (!floatingWindow) return;
+
+    // 1. 确保 windowScene 有效
+    if (!floatingWindow.windowScene) {
+        UIWindowScene *activeScene = nil;
+        for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
+            if (scene.activationState == UISceneActivationStateForegroundActive) {
+                activeScene = scene;
+                break;
+            }
+        }
+        if (!activeScene) {
+            for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
+                if ([scene isKindOfClass:[UIWindowScene class]]) {
+                    activeScene = scene;
+                    break;
+                }
+            }
+        }
+        floatingWindow.windowScene = activeScene;
+    }
+
+    // 2. 确保 frame 不被改小
+    CGRect screenBounds = [UIScreen mainScreen].bounds;
+    if (!CGRectEqualToRect(floatingWindow.frame, screenBounds)) {
+        floatingWindow.frame = screenBounds;
+    }
+
+    // 3. 强制可见
     floatingWindow.hidden = NO;
     floatingWindow.alpha = 1.0;
     floatingWindow.userInteractionEnabled = YES;
-    floatingWindow.windowLevel = CGFLOAT_MAX - 1; // 依然极高
-    // 强制成为 key window
+
+    // 4. 计算最高窗口层级（排除自身），并设置悬浮窗为其 +1
+    CGFloat maxLevel = -1;
+    for (UIWindowScene *sc in [UIApplication sharedApplication].connectedScenes) {
+        for (UIWindow *w in sc.windows) {
+            if (w != floatingWindow && !w.hidden && w.windowLevel > maxLevel) {
+                maxLevel = w.windowLevel;
+            }
+        }
+    }
+    floatingWindow.windowLevel = maxLevel + 1;
+
+    // 5. 确保渲染在最前
+    floatingWindow.layer.zPosition = CGFLOAT_MAX;
+
+    // 6. 确保为 key window
     if (!floatingWindow.isKeyWindow) {
         [floatingWindow makeKeyAndVisible];
     }
-    TESTLOG(@"🔝 悬浮窗置顶: level=%.0f key=%d", floatingWindow.windowLevel, floatingWindow.isKeyWindow);
+
+    // 调试日志
+    TESTLOG(@"🔝 悬浮窗置顶: level=%.0f key=%d scene=%@ frame=%@",
+            floatingWindow.windowLevel, floatingWindow.isKeyWindow, floatingWindow.windowScene, NSStringFromCGRect(floatingWindow.frame));
 }
 
 static void startGuardTimer() {
@@ -232,6 +277,7 @@ static void createFloatingWindow() {
 
     [floatingWindow.rootViewController.view addSubview:btn]; floatingWindow.actionButton=btn; floatingBtn=btn;
     startGuardTimer();
+    TESTLOG(@"🔴 悬浮窗创建完成");
 }
 
 static void scanForAdsInTopWindow() {
@@ -241,12 +287,16 @@ static void scanForAdsInTopWindow() {
         UIView *rootView = top.rootViewController.view ?: top;
         for (NSDictionary *rule in loadRules()) {
             UIView *adView = findViewWithClass(rootView, rule[@"adViewClass"]);
-            if (adView) tryAutoSkipWithRules(adView);
+            if (adView) {
+                if (tryAutoSkipWithRules(adView)) {
+                    TESTLOG(@"✅ 自动跳过成功");
+                }
+            }
         }
     });
 }
 
-// ========== Hook 区域 ==========
+// ========== Hook sendEvent: 学习模式（排除悬浮窗干扰） ==========
 static void (*orig_sendEvent)(id, SEL, UIEvent *);
 static void swizzled_sendEvent(UIApplication *self, SEL _cmd, UIEvent *event) {
     if(learningMode && !learnRecorded && event.type==UIEventTypeTouches) {
@@ -255,10 +305,25 @@ static void swizzled_sendEvent(UIApplication *self, SEL _cmd, UIEvent *event) {
                 UIButton *btn = (UIButton *)t.view;
                 NSString *title = btn.titleLabel.text?:btn.accessibilityLabel?:@"";
                 if([title containsString:@"跳过"]||[title containsString:@"Skip"]||[title containsString:@"关闭"]) {
+                    UIWindow *topWin = nil;
+                    CGFloat maxLevel = -1;
+                    for (UIWindowScene *sc in [UIApplication sharedApplication].connectedScenes) {
+                        for (UIWindow *w in sc.windows) {
+                            if (w != floatingWindow && !w.hidden && w.windowLevel > maxLevel) {
+                                maxLevel = w.windowLevel;
+                                topWin = w;
+                            }
+                        }
+                    }
+                    if (t.window != topWin) break;
+
                     learnRecorded=YES;
                     UIView *container = findFullScreenContainer(btn);
-                    addRule(container?NSStringFromClass([container class]):@"UnknownAdView", NSStringFromClass([btn class]), title, btn.accessibilityLabel);
-                    stopLearningMode(); orig_sendEvent(self, _cmd, event); return;
+                    NSString *adClass = container ? NSStringFromClass([container class]) : @"UnknownAdView";
+                    addRule(adClass, NSStringFromClass([btn class]), title, btn.accessibilityLabel);
+                    stopLearningMode();
+                    orig_sendEvent(self, _cmd, event);
+                    return;
                 }
             }
         }
@@ -266,11 +331,11 @@ static void swizzled_sendEvent(UIApplication *self, SEL _cmd, UIEvent *event) {
     orig_sendEvent(self, _cmd, event);
 }
 
+// ========== 其他 Hook ==========
 static void (*orig_setWindowLevel)(id, SEL, CGFloat);
 static void swizzled_setWindowLevel(UIWindow *self, SEL _cmd, CGFloat level) {
     orig_setWindowLevel(self, _cmd, level);
     if(!floatingWindow || self==floatingWindow) return;
-    // 任何窗口改变层级，立即抢夺 key window
     ensureFloatingOnTop();
 }
 
@@ -289,7 +354,6 @@ static void swizzled_removeFromSuperview(UIWindow *self, SEL _cmd) {
 static void (*orig_makeKeyAndVisible)(id, SEL);
 static void swizzled_makeKeyAndVisible(UIWindow *self, SEL _cmd) {
     orig_makeKeyAndVisible(self, _cmd);
-    // 任何窗口成为 key window，我们立即夺回
     if(self != floatingWindow) {
         ensureFloatingOnTop();
     }
