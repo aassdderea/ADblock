@@ -58,8 +58,6 @@ static _AdBlockGestureHandler *gestureHandler = nil;
 static BOOL learningMode = NO;
 static NSTimer *learnTimeout = nil;
 static BOOL learnRecorded = NO;
-static BOOL markUIShowing = NO;
-static UIWindow *markWindow = nil;
 
 // ---------- 方法替换 ----------
 static void replaceInstanceMethod(Class cls, SEL sel, id impBlock, IMP *origPtr) {
@@ -195,7 +193,7 @@ static void startLearningMode() {
     learnRecorded = NO;
     [floatingBtn setTitle:@"学习中" forState:UIControlStateNormal];
     floatingBtn.backgroundColor = [UIColor blueColor];
-    floatingWindow.windowLevel = UIWindowLevelNormal + 1; // 降低，避免遮挡广告
+    floatingWindow.windowLevel = UIWindowLevelNormal + 1;
     TESTLOG(@"📖 学习模式启动，请点击广告的跳过按钮");
     [learnTimeout invalidate];
     learnTimeout = [NSTimer scheduledTimerWithTimeInterval:LEARN_TIMEOUT repeats:NO block:^(NSTimer * _) {
@@ -211,7 +209,7 @@ static void stopLearningMode() {
     learnTimeout = nil;
     [floatingBtn setTitle:@"去广告" forState:UIControlStateNormal];
     floatingBtn.backgroundColor = [UIColor redColor];
-    updateFloatingLevel(); // 恢复悬浮窗层级
+    updateFloatingLevel();
     TESTLOG(@"📖 学习模式已退出");
 }
 
@@ -291,7 +289,7 @@ static void createFloatingWindow() {
     TESTLOG(@"🔴 悬浮窗创建完成");
 }
 
-// ---------- 扫描广告（备用） ----------
+// ---------- 扫描广告 ----------
 static BOOL isLikelyAdView(UIView *v) {
     CGRect b = [UIScreen mainScreen].bounds;
     if(v.frame.size.width < b.size.width*0.8 || v.frame.size.height < b.size.height*0.8) return NO;
@@ -318,7 +316,7 @@ static void scanForAdsInTopWindow() {
     });
 }
 
-// ---------- Hook sendEvent: 记录学习触摸 ----------
+// ---------- Hook sendEvent: 学习模式触摸记录 ----------
 static void (*orig_sendEvent)(id, SEL, UIEvent *);
 static void swizzled_sendEvent(UIApplication *self, SEL _cmd, UIEvent *event) {
     if(learningMode && !learnRecorded && event.type == UIEventTypeTouches) {
@@ -356,7 +354,7 @@ static void swizzled_sendEvent(UIApplication *self, SEL _cmd, UIEvent *event) {
 static void (*orig_makeKeyAndVisible)(id, SEL);
 static void swizzled_makeKeyAndVisible(UIWindow *self, SEL _cmd) {
     orig_makeKeyAndVisible(self, _cmd);
-    if(self == floatingWindow || self == markWindow) return;
+    if(self == floatingWindow) return;
     if(!learningMode) updateFloatingLevel();
     if(self.frame.size.width >= [UIScreen mainScreen].bounds.size.width*0.8 &&
        self.frame.size.height >= [UIScreen mainScreen].bounds.size.height*0.8 &&
