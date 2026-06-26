@@ -3,18 +3,22 @@ ARCHS := arm64
 
 include $(THEOS)/makefiles/common.mk
 
-# 使用 library 模板（生成纯净 .dylib，不链接 substrate）
 LIBRARY_NAME = AdBlock
 AdBlock_FILES = Tweak.m
-AdBlock_CFLAGS = -fobjc-arc
-AdBlock_FRAMEWORKS = UIKit
 
-# 安装路径仅用于 staging 目录结构（非必须，但保留）
+# ← 关键修复：添加编译标志
+AdBlock_CFLAGS = -fobjc-arc \
+    -Wno-deprecated-declarations \
+    -Wno-unused-variable \
+    -Wno-nullability-completeness
+
+# ← 关键修复：添加 QuartzCore（CABasicAnimation 学习模式脉冲动画需要）
+AdBlock_FRAMEWORKS = UIKit QuartzCore
+
 AdBlock_INSTALL_PATH = /Library/MobileSubstrate/DynamicLibraries
 
 include $(THEOS_MAKE_PATH)/library.mk
 
-# 复制最终 dylib 到 staging 目录
 internal-stage::
 	@mkdir -p $(THEOS_STAGING_DIR)/Library/MobileSubstrate/DynamicLibraries
 	@cp $(THEOS_OBJ_DIR)/$(LIBRARY_NAME).dylib $(THEOS_STAGING_DIR)/Library/MobileSubstrate/DynamicLibraries/
