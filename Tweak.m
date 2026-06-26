@@ -1,5 +1,5 @@
 // ==========================================
-// Tweak.m - 通用去开屏广告插件（纯 Runtime，无 Substrate 依赖）
+// Tweak.m - 通用去开屏广告插件（稳定版）
 // 适用于 TrollStore + TrollFools 注入
 // ==========================================
 
@@ -7,13 +7,13 @@
 #import <objc/runtime.h>
 
 // ---------- 可调参数 ----------
-#define SKIP_BTN_CHECK_DELAY  1.0   // 广告出现后多久开始寻找跳过按钮
-#define HEURISTIC_CHECK_DELAY 1.5   // 延迟检测，给广告视图构建时间
+#define SKIP_BTN_CHECK_DELAY  1.0
+#define HEURISTIC_CHECK_DELAY 1.5
 // ------------------------------
 
 #define TESTLOG(fmt, ...) NSLog(@"[AD-BLOCKER] " fmt, ##__VA_ARGS__)
 
-// ========== 辅助：方法替换（等效 MSHookMessageEx） ==========
+// ========== 方法替换（纯 Runtime） ==========
 static void replaceInstanceMethod(Class cls, SEL sel, id newImpBlock, IMP *origPtr) {
     Method m = class_getInstanceMethod(cls, sel);
     if (!m) return;
@@ -22,7 +22,7 @@ static void replaceInstanceMethod(Class cls, SEL sel, id newImpBlock, IMP *origP
     else method_setImplementation(m, newImp);
 }
 
-// ========== 辅助：触摸模拟及红圈调试 ==========
+// ========== 触摸模拟 ==========
 static void showTapIndicatorAtPoint(CGPoint screenPoint) {
     CGFloat size = 40.0;
     UIWindow *indicatorWindow = [[UIWindow alloc] initWithFrame:CGRectMake(screenPoint.x - size/2, screenPoint.y - size/2, size, size)];
@@ -47,8 +47,7 @@ static void showTapIndicatorAtPoint(CGPoint screenPoint) {
 }
 
 static void simulateTapAtPoint(CGPoint screenPoint) {
-    // 显示红圈反馈（调试用，可注释掉）
-    showTapIndicatorAtPoint(screenPoint);
+    showTapIndicatorAtPoint(screenPoint);  // 调试红圈，不需要可注释
     
     UIWindow *targetWindow = nil;
     CGFloat maxLevel = -1;
@@ -99,7 +98,6 @@ static void simulateTapAtPoint(CGPoint screenPoint) {
     });
 }
 
-// 查找视图树中的“跳过/关闭”按钮
 static UIButton *findSkipButtonInView(UIView *view) {
     if ([view isKindOfClass:[UIButton class]]) {
         UIButton *btn = (UIButton *)view;
@@ -119,87 +117,73 @@ static UIButton *findSkipButtonInView(UIView *view) {
     return nil;
 }
 
-// 获取按钮在屏幕上的绝对坐标
 static CGPoint screenPointForView(UIView *view) {
     CGRect frameInScreen = [view convertRect:view.bounds toView:nil];
     return CGPointMake(CGRectGetMidX(frameInScreen), CGRectGetMidY(frameInScreen));
 }
 
-// ========== 已知 SDK 全自动 Hook ==========
+// ========== 已知 SDK 自动 Hook ==========
 static BOOL knownHookApplied = NO;
 static void applyKnownSDKHooks() {
     if (knownHookApplied) return;
     knownHookApplied = YES;
     
     Class cls;
-    
-    // 穿山甲：BUSplashAdView
+    // 穿山甲
     cls = NSClassFromString(@"BUSplashAdView");
     if (cls) {
         replaceInstanceMethod(cls, @selector(showInWindow:), ^(id self, UIWindow *window) {
-            TESTLOG(@"🛑 [穿山甲] 拦截 BUSplashAdView showInWindow:");
+            TESTLOG(@"🛑 [穿山甲] 拦截");
             id delegate = [self valueForKey:@"delegate"];
             if (delegate && [delegate respondsToSelector:@selector(splashAdDidClose:)]) {
                 [delegate performSelector:@selector(splashAdDidClose:) withObject:self];
             }
         }, NULL);
     }
-    
-    // 优量汇：GDTSplashAd
+    // 优量汇
     cls = NSClassFromString(@"GDTSplashAd");
     if (cls) {
         replaceInstanceMethod(cls, @selector(loadAndShowInWindow:), ^(id self, UIWindow *window) {
-            TESTLOG(@"🛑 [优量汇] 拦截 GDTSplashAd loadAndShowInWindow:");
+            TESTLOG(@"🛑 [优量汇] 拦截");
             id delegate = [self valueForKey:@"delegate"];
             if (delegate && [delegate respondsToSelector:@selector(splashAdDidDismiss:)]) {
                 [delegate performSelector:@selector(splashAdDidDismiss:) withObject:self];
             }
         }, NULL);
     }
-    
-    // 百度：BaiduMobAdSplash
+    // 百度
     cls = NSClassFromString(@"BaiduMobAdSplash");
     if (cls) {
         replaceInstanceMethod(cls, @selector(showInWindow:), ^(id self, UIWindow *window) {
-            TESTLOG(@"🛑 [百度] 拦截 BaiduMobAdSplash showInWindow:");
+            TESTLOG(@"🛑 [百度] 拦截");
             id delegate = [self valueForKey:@"delegate"];
             if (delegate && [delegate respondsToSelector:@selector(splashAdDidClose:)]) {
                 [delegate performSelector:@selector(splashAdDidClose:) withObject:self];
             }
         }, NULL);
     }
-    
-    // 可继续添加快手、AdMob 等，模式相同
 }
 
-// ========== 用户自定义规则（指纹）持久化 ==========
+// ========== 用户规则持久化 ==========
 static NSString *documentsPath() {
     return NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
 }
-
 static NSString *rulesFilePath() {
     return [documentsPath() stringByAppendingPathComponent:@"com.adblocker.rules.plist"];
 }
-
 static NSMutableArray<NSDictionary *> *loadCustomRules() {
     NSArray *arr = [NSArray arrayWithContentsOfFile:rulesFilePath()];
     return arr ? [arr mutableCopy] : [NSMutableArray array];
 }
-
 static void saveCustomRules(NSArray *rules) {
     [rules writeToFile:rulesFilePath() atomically:YES];
 }
-
 static void addCustomRule(UIView *adView, UIButton *skipBtn) {
     NSMutableDictionary *rule = [NSMutableDictionary dictionary];
     rule[@"adViewClass"] = NSStringFromClass([adView class]);
     rule[@"skipBtnClass"] = NSStringFromClass([skipBtn class]);
-    if (skipBtn.titleLabel.text) {
-        rule[@"skipBtnTitleKeyword"] = skipBtn.titleLabel.text;
-    }
-    if (skipBtn.accessibilityLabel) {
-        rule[@"skipBtnAccLabelKeyword"] = skipBtn.accessibilityLabel;
-    }
+    if (skipBtn.titleLabel.text) rule[@"skipBtnTitleKeyword"] = skipBtn.titleLabel.text;
+    if (skipBtn.accessibilityLabel) rule[@"skipBtnAccLabelKeyword"] = skipBtn.accessibilityLabel;
     
     NSMutableArray *rules = loadCustomRules();
     BOOL exists = NO;
@@ -212,16 +196,14 @@ static void addCustomRule(UIView *adView, UIButton *skipBtn) {
     if (!exists) {
         [rules addObject:rule];
         saveCustomRules(rules);
-        TESTLOG(@"✅ 已添加自定义规则：%@", rule);
+        TESTLOG(@"✅ 已添加规则：%@", rule);
     }
 }
-
 static BOOL tryAutoSkipWithRules(UIView *adView) {
     NSArray *rules = loadCustomRules();
     for (NSDictionary *rule in rules) {
-        NSString *clsName = rule[@"adViewClass"];
-        if ([NSStringFromClass([adView class]) isEqualToString:clsName]) {
-            TESTLOG(@"🎯 命中自定义规则，尝试自动跳过: %@", clsName);
+        if ([NSStringFromClass([adView class]) isEqualToString:rule[@"adViewClass"]]) {
+            TESTLOG(@"🎯 命中规则，自动跳过");
             UIButton *skipBtn = nil;
             NSString *btnCls = rule[@"skipBtnClass"];
             if (btnCls) {
@@ -232,15 +214,11 @@ static BOOL tryAutoSkipWithRules(UIView *adView) {
                     }
                 }
             }
-            if (!skipBtn) {
-                skipBtn = findSkipButtonInView(adView);
-            }
+            if (!skipBtn) skipBtn = findSkipButtonInView(adView);
             if (skipBtn) {
-                CGPoint pt = screenPointForView(skipBtn);
-                simulateTapAtPoint(pt);
+                simulateTapAtPoint(screenPointForView(skipBtn));
                 return YES;
             } else {
-                TESTLOG(@"⚠️ 规则存在但未找到跳过按钮，移除视图");
                 [adView removeFromSuperview];
                 return YES;
             }
@@ -249,31 +227,38 @@ static BOOL tryAutoSkipWithRules(UIView *adView) {
     return NO;
 }
 
-// ========== 未知广告标记 UI ==========
+// ========== 标记弹窗（修复自动消失） ==========
+static BOOL markUIShowing = NO;
+
 static void showMarkUI(UIView *suspiciousView) {
+    if (markUIShowing) return;
+    markUIShowing = YES;
+    
     UIWindow *alertWin = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
-    alertWin.windowLevel = UIWindowLevelAlert + 200;
-    alertWin.backgroundColor = [UIColor colorWithWhite:0 alpha:0.5];
+    alertWin.windowLevel = UIWindowLevelAlert + 1000;  // 极高，盖住一切
+    alertWin.backgroundColor = [UIColor colorWithWhite:0 alpha:0.4];
     alertWin.hidden = NO;
     
     UIViewController *vc = [[UIViewController alloc] init];
     vc.view.backgroundColor = [UIColor clearColor];
     alertWin.rootViewController = vc;
     
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"发现疑似开屏广告" message:@"要自动跳过这类广告吗？" preferredStyle:UIAlertControllerStyleAlert];
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"发现疑似开屏广告" 
+                                                                   message:@"要自动跳过这类广告吗？" 
+                                                            preferredStyle:UIAlertControllerStyleAlert];
     
     __weak UIView *weakAdView = suspiciousView;
     __weak UIWindow *weakWin = alertWin;
     
     UIAlertAction *skipOnce = [UIAlertAction actionWithTitle:@"仅跳过本次" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
+        markUIShowing = NO;
         UIButton *skipBtn = findSkipButtonInView(weakAdView);
-        if (skipBtn) {
-            simulateTapAtPoint(screenPointForView(skipBtn));
-        }
+        if (skipBtn) simulateTapAtPoint(screenPointForView(skipBtn));
         weakWin.hidden = YES;
     }];
     
     UIAlertAction *skipAlways = [UIAlertAction actionWithTitle:@"总是自动跳过" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
+        markUIShowing = NO;
         UIButton *skipBtn = findSkipButtonInView(weakAdView);
         if (skipBtn) {
             addCustomRule(weakAdView, skipBtn);
@@ -283,6 +268,7 @@ static void showMarkUI(UIView *suspiciousView) {
     }];
     
     UIAlertAction *notAd = [UIAlertAction actionWithTitle:@"不是广告" style:UIAlertActionStyleCancel handler:^(UIAlertAction * _Nonnull action) {
+        markUIShowing = NO;
         weakWin.hidden = YES;
     }];
     
@@ -293,17 +279,14 @@ static void showMarkUI(UIView *suspiciousView) {
     [vc presentViewController:alert animated:YES completion:nil];
 }
 
-// ========== 启发式检测：判断视图是否可能是开屏广告 ==========
+// ========== 启发式检测 ==========
 static BOOL isLikelyAdView(UIView *view) {
     CGRect screenBounds = [UIScreen mainScreen].bounds;
     if (view.frame.size.width < screenBounds.size.width * 0.8 ||
         view.frame.size.height < screenBounds.size.height * 0.8) {
         return NO;
     }
-    
-    UIButton *skip = findSkipButtonInView(view);
-    if (skip) return YES;
-    
+    if (findSkipButtonInView(view)) return YES;
     NSString *className = NSStringFromClass([view class]);
     NSArray *keywords = @[@"Splash", @"Ad", @"Launch", @"Popup"];
     for (NSString *kw in keywords) {
@@ -314,9 +297,7 @@ static BOOL isLikelyAdView(UIView *view) {
     return NO;
 }
 
-// ========== 检测当前顶层窗口中的广告 ==========
 static void scanForAdsInTopWindow() {
-    // 延迟执行，等启动广告完全加载
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(HEURISTIC_CHECK_DELAY * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         UIWindow *topWindow = nil;
         CGFloat maxLevel = -1;
@@ -332,8 +313,6 @@ static void scanForAdsInTopWindow() {
                 }
             }
         }
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
         if (!topWindow) {
             for (UIWindow *w in [UIApplication sharedApplication].windows) {
                 if (!w.isHidden && w.alpha > 0.01 && w.windowLevel > maxLevel) {
@@ -342,37 +321,30 @@ static void scanForAdsInTopWindow() {
                 }
             }
         }
-#pragma clang diagnostic pop
-        
         if (!topWindow) return;
         
         UIView *root = topWindow.rootViewController.view ?: topWindow;
         for (UIView *sub in root.subviews) {
             if (isLikelyAdView(sub)) {
-                if (tryAutoSkipWithRules(sub)) {
-                    continue;
-                }
+                if (tryAutoSkipWithRules(sub)) continue;
                 showMarkUI(sub);
             }
         }
     });
 }
 
-// ========== 拦截 UIWindow 的 makeKeyAndVisible ==========
+// ========== 拦截新窗口 ==========
 static void (*orig_makeKeyAndVisible)(id, SEL);
 static void swizzled_makeKeyAndVisible(UIWindow *self, SEL _cmd) {
     orig_makeKeyAndVisible(self, _cmd);
-    
     if (self.frame.size.width >= [UIScreen mainScreen].bounds.size.width * 0.8 &&
         self.frame.size.height >= [UIScreen mainScreen].bounds.size.height * 0.8 &&
         self.windowLevel > UIWindowLevelNormal + 1) {
-        TESTLOG(@"🔍 检测到高等级全屏窗口: %@", NSStringFromClass([self class]));
+        TESTLOG(@"🔍 检测到高等级窗口");
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(SKIP_BTN_CHECK_DELAY * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             for (UIView *sub in self.subviews) {
                 if (isLikelyAdView(sub)) {
-                    if (tryAutoSkipWithRules(sub)) {
-                        return;
-                    }
+                    if (tryAutoSkipWithRules(sub)) return;
                     showMarkUI(sub);
                 }
             }
@@ -380,27 +352,62 @@ static void swizzled_makeKeyAndVisible(UIWindow *self, SEL _cmd) {
     }
 }
 
-// ========== 初始化入口 ==========
+// ========== 悬浮按钮（手动触发） ==========
+static void addFloatingButton() {
+    UIWindow *btnWin = [[UIWindow alloc] initWithFrame:CGRectMake([UIScreen mainScreen].bounds.size.width - 60, 100, 50, 50)];
+    btnWin.windowLevel = UIWindowLevelAlert + 1001;
+    btnWin.backgroundColor = [UIColor clearColor];
+    btnWin.hidden = NO;
+    
+    UIButton *btn = [UIButton buttonWithType:UIButtonTypeCustom];
+    btn.frame = btnWin.bounds;
+    btn.backgroundColor = [[UIColor systemBlueColor] colorWithAlphaComponent:0.7];
+    btn.layer.cornerRadius = 25;
+    [btn setTitle:@"🛡️" forState:UIControlStateNormal];
+    [btn addAction:[UIAction actionWithHandler:^(__kindof UIAction * _Nonnull action) {
+        scanForAdsInTopWindow();
+    }] forControlEvents:UIControlEventTouchUpInside];
+    [btnWin addSubview:btn];
+    
+    // 支持拖动
+    __block CGPoint startPoint;
+    UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:nil action:^(UIPanGestureRecognizer *gesture) {
+        if (gesture.state == UIGestureRecognizerStateBegan) {
+            startPoint = [gesture locationInView:btnWin];
+        } else {
+            CGPoint curr = [gesture locationInView:nil];
+            CGPoint newOrigin = CGPointMake(curr.x - startPoint.x, curr.y - startPoint.y);
+            btnWin.frame = (CGRect){ .origin = newOrigin, .size = btnWin.frame.size };
+        }
+    }];
+    [btn addGestureRecognizer:pan];
+}
+
+// ========== 初始化 ==========
 __attribute__((constructor))
 static void adblock_init() {
     TESTLOG(@"🚀 通用去广告插件已加载");
     
-    // 应用已知 SDK Hook
     applyKnownSDKHooks();
     
-    // 替换 UIWindow 的 makeKeyAndVisible 方法
+    // Hook UIWindow
     Method m = class_getInstanceMethod([UIWindow class], @selector(makeKeyAndVisible));
     if (m) {
         orig_makeKeyAndVisible = (void (*)(id, SEL))method_getImplementation(m);
         method_setImplementation(m, (IMP)swizzled_makeKeyAndVisible);
     }
     
-    // 监听 App 激活，进行启发式检测
+    // 激活检测
     [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidBecomeActiveNotification
                                                       object:nil
                                                        queue:[NSOperationQueue mainQueue]
                                                   usingBlock:^(NSNotification * _Nonnull note) {
-        TESTLOG(@"📱 App 变为活跃，开始广告检测");
+        TESTLOG(@"📱 App 活跃，开始广告检测");
         scanForAdsInTopWindow();
     }];
+    
+    // 显示悬浮按钮（可拖动）
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        addFloatingButton();
+    });
 }
