@@ -1,5 +1,6 @@
 // ==========================================
-// Tweak.m - 通用去开屏广告插件（iOS 16 盾牌修复）
+// Tweak.m - 通用去开屏广告插件（iOS 16 最终版）
+// 适用于 TrollStore + TrollFools 注入
 // ==========================================
 
 #import <UIKit/UIKit.h>
@@ -26,18 +27,16 @@
 }
 @end
 
-// ---------- 安全获取当前活跃 Scene ----------
-static UIWindowScene * _Nullable currentActiveScene(void) {
-    __block UIWindowScene *scene = nil;
+// ---------- 获取任意可用的 WindowScene（不要求活跃） ----------
+static UIWindowScene * _Nullable anyWindowScene(void) {
     if (@available(iOS 13.0, *)) {
-        [[UIApplication sharedApplication].connectedScenes enumerateObjectsUsingBlock:^(UIScene *obj, BOOL *stop) {
-            if ([obj isKindOfClass:[UIWindowScene class]] && obj.activationState == UISceneActivationStateForegroundActive) {
-                scene = (UIWindowScene *)obj;
-                *stop = YES;
+        for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+            if ([scene isKindOfClass:[UIWindowScene class]]) {
+                return (UIWindowScene *)scene;
             }
-        }];
+        }
     }
-    return scene;
+    return nil;
 }
 
 // ---------- 方法替换 ----------
@@ -74,7 +73,7 @@ static void showTapIndicatorAtPoint(CGPoint screenPoint) {
 }
 
 static void simulateTapAtPoint(CGPoint screenPoint) {
-    showTapIndicatorAtPoint(screenPoint); // 可注释
+    showTapIndicatorAtPoint(screenPoint); // 调试红圈，可注释
     
     UIWindow *targetWindow = nil;
     CGFloat maxLevel = -1;
@@ -145,24 +144,27 @@ static CGPoint screenPointForView(UIView *view) {
     return CGPointMake(CGRectGetMidX(frameInScreen), CGRectGetMidY(frameInScreen));
 }
 
-// ---------- 已知 SDK 拦截 ----------
+// ---------- 已知 SDK 自动拦截 ----------
 static BOOL knownHookApplied = NO;
 static void applyKnownSDKHooks() {
     if (knownHookApplied) return;
     knownHookApplied = YES;
     Class cls;
+    // 穿山甲
     cls = NSClassFromString(@"BUSplashAdView");
     if (cls) replaceInstanceMethod(cls, @selector(showInWindow:), ^(id self, UIWindow *window) {
         id delegate = [self valueForKey:@"delegate"];
         if (delegate && [delegate respondsToSelector:@selector(splashAdDidClose:)])
             [delegate performSelector:@selector(splashAdDidClose:) withObject:self];
     }, NULL);
+    // 优量汇
     cls = NSClassFromString(@"GDTSplashAd");
     if (cls) replaceInstanceMethod(cls, @selector(loadAndShowInWindow:), ^(id self, UIWindow *window) {
         id delegate = [self valueForKey:@"delegate"];
         if (delegate && [delegate respondsToSelector:@selector(splashAdDidDismiss:)])
             [delegate performSelector:@selector(splashAdDidDismiss:) withObject:self];
     }, NULL);
+    // 百度
     cls = NSClassFromString(@"BaiduMobAdSplash");
     if (cls) replaceInstanceMethod(cls, @selector(showInWindow:), ^(id self, UIWindow *window) {
         id delegate = [self valueForKey:@"delegate"];
@@ -171,7 +173,7 @@ static void applyKnownSDKHooks() {
     }, NULL);
 }
 
-// ---------- 规则持久化 ----------
+// ---------- 用户规则持久化 ----------
 static NSString *rulesPath() {
     return [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject
             stringByAppendingPathComponent:@"com.adblocker.rules.plist"];
@@ -221,7 +223,7 @@ static void showMarkUI(UIView *adView) {
     if (markUIShowing) return;
     markUIShowing = YES;
     UIWindow *win = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
-    win.windowScene = currentActiveScene(); // 使用当前活跃 Scene
+    win.windowScene = anyWindowScene();  // 使用任意可用 Scene
     win.windowLevel = UIWindowLevelAlert + 1000;
     win.backgroundColor = [UIColor colorWithWhite:0 alpha:0.4];
     win.hidden = NO;
@@ -320,64 +322,45 @@ static void swizzled_makeKeyAndVisible(UIWindow *self, SEL _cmd) {
     }
 }
 
-// ========== 悬浮按钮（iOS 16 修复：延迟 + 确保 Scene 可用） ==========
+// ========== 悬浮按钮（最终修复版） ==========
 static void addFloatingButton() {
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        __block int retry = 0;
-        __block UIWindowScene *scene = currentActiveScene();
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        UIWindowScene *scene = anyWindowScene();
         
-        void (^createButton)(void) = ^{
-            UIWindow *btnWin = [[UIWindow alloc] initWithFrame:CGRectMake([UIScreen mainScreen].bounds.size.width - 60, 120, 50, 50)];
-            btnWin.windowScene = scene; // 可能为 nil，但 iOS 13+ 会生效
-            btnWin.windowLevel = UIWindowLevelStatusBar + 100;
-            btnWin.backgroundColor = [UIColor clearColor];
-            btnWin.hidden = NO;
-            
-            UIButton *btn = [UIButton buttonWithType:UIButtonTypeCustom];
-            btn.frame = btnWin.bounds;
-            btn.backgroundColor = [[UIColor systemBlueColor] colorWithAlphaComponent:0.8];
-            btn.layer.cornerRadius = 25;
-            btn.layer.shadowColor = [UIColor blackColor].CGColor;
-            btn.layer.shadowOffset = CGSizeMake(0, 2);
-            btn.layer.shadowOpacity = 0.3;
-            [btn setTitle:@"🛡️" forState:UIControlStateNormal];
-            [btn addAction:[UIAction actionWithHandler:^(__kindof UIAction * _) {
-                scanForAdsInTopWindow();
-            }] forControlEvents:UIControlEventTouchUpInside];
-            [btnWin addSubview:btn];
-            
-            _AdBlockGestureHandler *handler = [[_AdBlockGestureHandler alloc] initWithBlock:^(UIPanGestureRecognizer *gesture) {
-                static CGPoint start;
-                if (gesture.state == UIGestureRecognizerStateBegan) {
-                    start = [gesture locationInView:btnWin];
-                } else {
-                    CGPoint curr = [gesture locationInView:nil];
-                    btnWin.frame = CGRectMake(curr.x - start.x, curr.y - start.y,
-                                              btnWin.frame.size.width, btnWin.frame.size.height);
-                }
-            }];
-            UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:handler action:@selector(handlePan:)];
-            [btn addGestureRecognizer:pan];
-            
-            TESTLOG(@"🛡️ 悬浮按钮已创建 (Scene: %@)", scene);
-        };
+        UIWindow *btnWin = [[UIWindow alloc] initWithFrame:CGRectMake([UIScreen mainScreen].bounds.size.width - 80, 150, 60, 60)];
+        btnWin.windowScene = scene;
+        btnWin.windowLevel = UIWindowLevelAlert + 2000;  // 极高，确保可见
+        btnWin.backgroundColor = [UIColor clearColor];
+        btnWin.hidden = NO;
         
-        if (scene) {
-            createButton();
-        } else {
-            __block NSTimer *timer = [NSTimer scheduledTimerWithTimeInterval:0.2 repeats:YES block:^(NSTimer * _Nonnull t) {
-                scene = currentActiveScene();
-                if (scene || ++retry > 10) {
-                    [t invalidate];
-                    if (scene) {
-                        createButton();
-                    } else {
-                        TESTLOG(@"❌ 未找到活跃 Scene，悬浮按钮创建失败");
-                    }
-                }
-            }];
-            (void)timer;   // ← 就是这一行，消除 unused variable 警告
-        }
+        UIButton *btn = [UIButton buttonWithType:UIButtonTypeCustom];
+        btn.frame = btnWin.bounds;
+        btn.backgroundColor = [UIColor systemBlueColor];
+        btn.layer.cornerRadius = 30;
+        btn.layer.shadowColor = [UIColor blackColor].CGColor;
+        btn.layer.shadowOffset = CGSizeMake(0, 4);
+        btn.layer.shadowOpacity = 0.5;
+        [btn setTitle:@"🛡️" forState:UIControlStateNormal];
+        [btn addAction:[UIAction actionWithHandler:^(__kindof UIAction * _) {
+            scanForAdsInTopWindow();
+        }] forControlEvents:UIControlEventTouchUpInside];
+        [btnWin addSubview:btn];
+        
+        // 支持拖动
+        _AdBlockGestureHandler *handler = [[_AdBlockGestureHandler alloc] initWithBlock:^(UIPanGestureRecognizer *gesture) {
+            static CGPoint start;
+            if (gesture.state == UIGestureRecognizerStateBegan) {
+                start = [gesture locationInView:btnWin];
+            } else {
+                CGPoint curr = [gesture locationInView:nil];
+                btnWin.frame = CGRectMake(curr.x - start.x, curr.y - start.y,
+                                          btnWin.frame.size.width, btnWin.frame.size.height);
+            }
+        }];
+        UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:handler action:@selector(handlePan:)];
+        [btn addGestureRecognizer:pan];
+        
+        TESTLOG(@"🛡️ 悬浮按钮已创建 (Scene: %@)", scene);
     });
 }
 
@@ -385,7 +368,7 @@ static void addFloatingButton() {
 static void showLoadedToast() {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         UIWindow *toastWin = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
-        toastWin.windowScene = currentActiveScene(); // 使用辅助函数
+        toastWin.windowScene = anyWindowScene();  // 使用任意可用 Scene
         toastWin.windowLevel = UIWindowLevelAlert + 999;
         toastWin.backgroundColor = [UIColor clearColor];
         toastWin.userInteractionEnabled = NO;
