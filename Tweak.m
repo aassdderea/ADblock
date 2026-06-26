@@ -1,5 +1,5 @@
 // ==========================================
-// Tweak.m - 通用去开屏广告插件（终极防遮挡版）
+// Tweak.m - 通用去开屏广告插件（终极调试版）
 // 适用于 iOS 16.6 + TrollStore
 // ==========================================
 
@@ -11,7 +11,8 @@
 #define HEURISTIC_CHECK_DELAY 1.5
 #define LONG_PRESS_DURATION   1.0
 #define LEARN_TIMEOUT         10.0
-#define GUARD_INTERVAL        0.3   // 守护定时器间隔
+#define GUARD_INTERVAL        0.3
+#define FLOATING_LEVEL        (UIWindowLevelStatusBar + 100000) // 极高但安全
 // ------------------------------
 
 #define TESTLOG(fmt, ...) NSLog(@"[AD-BLOCKER] " fmt, ##__VA_ARGS__)
@@ -29,6 +30,7 @@ static void addRule(NSString *adClass, NSString *btnClass, NSString *titleKeywor
 static BOOL tryAutoSkipWithRules(UIView *adView);
 static void showLoadedToast(void);
 static void createFloatingWindow(void);
+static void dumpAllWindows(void);
 
 // ---------- 手势辅助类 ----------
 @interface _AdBlockGestureHandler : NSObject
@@ -52,6 +54,8 @@ static void createFloatingWindow(void);
         return self.actionButton;
     return nil;
 }
+// 拒绝成为 key window，避免干扰其他窗口
+- (BOOL)_canBecomeKeyWindow { return NO; }
 @end
 
 // ---------- 全局变量 ----------
@@ -72,7 +76,7 @@ static void replaceInstanceMethod(Class cls, SEL sel, id impBlock, IMP *origPtr)
     else method_setImplementation(m, imp);
 }
 
-// ---------- 触摸模拟（高仿真，随机偏移+时间戳） ----------
+// ---------- 触摸模拟（高仿真） ----------
 static void simulateTapAtPoint(CGPoint screenPoint) {
     CGFloat jitterX = ((CGFloat)arc4random() / UINT32_MAX) * 4 - 2;
     CGFloat jitterY = ((CGFloat)arc4random() / UINT32_MAX) * 4 - 2;
@@ -215,14 +219,27 @@ static UIView *findViewWithClass(UIView *root, NSString *className) {
     return nil;
 }
 
-// ---------- 学习模式（悬浮窗绝不降级） ----------
+// ---------- 调试：打印所有窗口信息 ----------
+static void dumpAllWindows() {
+    NSMutableString *dbg = [NSMutableString stringWithString:@"\n=== 当前所有窗口 ===\n"];
+    for (UIWindowScene *sc in [UIApplication sharedApplication].connectedScenes) {
+        for (UIWindow *w in sc.windows) {
+            [dbg appendFormat:@"  %@: level=%.0f hidden=%d alpha=%.2f frame=%@\n",
+             NSStringFromClass([w class]), w.windowLevel, w.hidden, w.alpha, NSStringFromCGRect(w.frame)];
+        }
+    }
+    [dbg appendString:@"=======================\n"];
+    TESTLOG(@"%@", dbg);
+}
+
+// ---------- 学习模式 ----------
 static void startLearningMode() {
     if(learningMode) return;
     learningMode = YES;
     learnRecorded = NO;
     [floatingBtn setTitle:@"学习中" forState:UIControlStateNormal];
     floatingBtn.backgroundColor = [UIColor blueColor];
-    TESTLOG(@"📖 学习模式启动，请点击广告的跳过按钮");
+    TESTLOG(@"📖 学习模式启动");
     [learnTimeout invalidate];
     learnTimeout = [NSTimer scheduledTimerWithTimeInterval:LEARN_TIMEOUT repeats:NO block:^(NSTimer * _) {
         TESTLOG(@"⏰ 学习模式超时自动退出");
@@ -237,32 +254,37 @@ static void stopLearningMode() {
     learnTimeout = nil;
     [floatingBtn setTitle:@"去广告" forState:UIControlStateNormal];
     floatingBtn.backgroundColor = [UIColor redColor];
-    ensureFloatingOnTop(); // 恢复层级
+    ensureFloatingOnTop();
     TESTLOG(@"📖 学习模式已退出");
 }
 
-// ========== 核心：确保悬浮窗在最顶层（绝对极大值） ==========
+// ========== 悬浮窗置顶（不成为key window） ==========
 static void ensureFloatingOnTop() {
     if (!floatingWindow) return;
-    // 强制设置为极大值，永远不可能被超越
-    floatingWindow.windowLevel = CGFLOAT_MAX - 100;
+    floatingWindow.windowLevel = FLOATING_LEVEL;
     floatingWindow.hidden = NO;
-    [floatingWindow makeKeyAndVisible];
+    // 不再调用 makeKeyAndVisible，避免干扰其他窗口
+    if (!floatingWindow.isKeyWindow) {
+        // 如果确实需要成为key window才能接收事件？不需要，我们的触摸穿透窗口不需要key window。
+    }
+    // 调试日志
+    TESTLOG(@"🔝 悬浮窗置顶: level=%.0f hidden=%d key=%d", floatingWindow.windowLevel, floatingWindow.hidden, floatingWindow.isKeyWindow);
 }
 
-// 守护定时器：定期检查悬浮窗状态
+// 守护定时器
 static void startGuardTimer() {
     [guardTimer invalidate];
     guardTimer = [NSTimer scheduledTimerWithTimeInterval:GUARD_INTERVAL repeats:YES block:^(NSTimer *timer) {
         if (!floatingWindow) return;
-        if (floatingWindow.windowLevel < CGFLOAT_MAX - 1000 || floatingWindow.hidden) {
-            TESTLOG(@"🔧 守护发现异常，强制置顶");
+        BOOL needFix = (floatingWindow.windowLevel < FLOATING_LEVEL - 1000) || floatingWindow.hidden;
+        if (needFix) {
+            TESTLOG(@"🔧 守护发现异常 (level=%.0f hidden=%d)，强制置顶", floatingWindow.windowLevel, floatingWindow.hidden);
             ensureFloatingOnTop();
         }
     }];
 }
 
-// ---------- 悬浮窗创建（使用极大值层级） ----------
+// ---------- 悬浮窗创建 ----------
 static void createFloatingWindow() {
     if(floatingWindow) return;
     floatingWindow = [[_FloatingWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
@@ -276,7 +298,7 @@ static void createFloatingWindow() {
     floatingWindow.userInteractionEnabled = YES;
     floatingWindow.rootViewController = [UIViewController new];
     floatingWindow.rootViewController.view.backgroundColor = [UIColor clearColor];
-    ensureFloatingOnTop(); // 设置极大值并显示
+    ensureFloatingOnTop(); // 设置层级并显示
 
     UIButton *btn = [UIButton buttonWithType:UIButtonTypeCustom];
     CGFloat s = 60;
@@ -316,11 +338,12 @@ static void createFloatingWindow() {
     [floatingWindow.rootViewController.view addSubview:btn];
     floatingWindow.actionButton = btn;
     floatingBtn = btn;
-    startGuardTimer(); // 启动永久守护
+    startGuardTimer();
     TESTLOG(@"🔴 悬浮窗创建完成 (level: %.0f)", floatingWindow.windowLevel);
+    dumpAllWindows(); // 创建时打印一次窗口列表
 }
 
-// ---------- 扫描广告（递归按类名查找） ----------
+// ---------- 扫描广告 ----------
 static void scanForAdsInTopWindow() {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, HEURISTIC_CHECK_DELAY*NSEC_PER_SEC), dispatch_get_main_queue(), ^{
         UIWindow *top = nil; CGFloat maxL = -1;
@@ -347,7 +370,7 @@ static void scanForAdsInTopWindow() {
     });
 }
 
-// ---------- Hook sendEvent: 学习模式增强过滤 ----------
+// ---------- Hook sendEvent: 学习模式过滤 ----------
 static void (*orig_sendEvent)(id, SEL, UIEvent *);
 static void swizzled_sendEvent(UIApplication *self, SEL _cmd, UIEvent *event) {
     if(learningMode && !learnRecorded && event.type == UIEventTypeTouches) {
@@ -390,13 +413,14 @@ static void swizzled_sendEvent(UIApplication *self, SEL _cmd, UIEvent *event) {
     orig_sendEvent(self, _cmd, event);
 }
 
-// ---------- Hook setWindowLevel: 防止其他窗口超越 ----------
+// ---------- Hook setWindowLevel: 监控及抢回 ----------
 static void (*orig_setWindowLevel)(id, SEL, CGFloat);
 static void swizzled_setWindowLevel(UIWindow *self, SEL _cmd, CGFloat level) {
     orig_setWindowLevel(self, _cmd, level);
     if (!floatingWindow || self == floatingWindow) return;
-    // 双保险：任何窗口调高，守护会定期纠正，这里仅作日志记录或紧急干预
+    TESTLOG(@"⚠️ 窗口 %@ 设置层级为 %.0f", NSStringFromClass([self class]), level);
     if (level >= floatingWindow.windowLevel) {
+        TESTLOG(@"🆘 窗口层级超越悬浮窗，强制置顶");
         ensureFloatingOnTop();
     }
 }
@@ -405,7 +429,8 @@ static void swizzled_setWindowLevel(UIWindow *self, SEL _cmd, CGFloat level) {
 static void (*orig_setHidden)(id, SEL, BOOL);
 static void swizzled_setHidden(UIWindow *self, SEL _cmd, BOOL hidden) {
     if (self == floatingWindow && hidden) {
-        return; // 拒绝隐藏悬浮窗
+        TESTLOG(@"🛑 拦截企图隐藏悬浮窗");
+        return;
     }
     orig_setHidden(self, _cmd, hidden);
 }
@@ -415,7 +440,9 @@ static void (*orig_makeKeyAndVisible)(id, SEL);
 static void swizzled_makeKeyAndVisible(UIWindow *self, SEL _cmd) {
     orig_makeKeyAndVisible(self, _cmd);
     if (self == floatingWindow) return;
-    ensureFloatingOnTop(); // 新窗口成为 key，立刻再次确保悬浮窗最高
+    TESTLOG(@"📌 窗口 %@ 变为KeyWindow", NSStringFromClass([self class]));
+    ensureFloatingOnTop();
+    dumpAllWindows(); // 有窗口成为 key 时打印窗口列表
 }
 
 // ---------- Toast ----------
@@ -437,22 +464,18 @@ static void adblock_init() {
     TESTLOG(@"🚀 初始化");
     applyKnownSDKHooks();
 
-    // Hook setWindowLevel:
     Method levelMethod = class_getInstanceMethod([UIWindow class], @selector(setWindowLevel:));
     orig_setWindowLevel = (void (*)(id, SEL, CGFloat))method_getImplementation(levelMethod);
     method_setImplementation(levelMethod, (IMP)swizzled_setWindowLevel);
 
-    // Hook setHidden:
     Method hiddenMethod = class_getInstanceMethod([UIWindow class], @selector(setHidden:));
     orig_setHidden = (void (*)(id, SEL, BOOL))method_getImplementation(hiddenMethod);
     method_setImplementation(hiddenMethod, (IMP)swizzled_setHidden);
 
-    // Hook makeKeyAndVisible:
     Method keyMethod = class_getInstanceMethod([UIWindow class], @selector(makeKeyAndVisible));
     orig_makeKeyAndVisible = (void (*)(id, SEL))method_getImplementation(keyMethod);
     method_setImplementation(keyMethod, (IMP)swizzled_makeKeyAndVisible);
 
-    // Hook sendEvent:
     Method sendMethod = class_getInstanceMethod([UIApplication class], @selector(sendEvent:));
     orig_sendEvent = (void (*)(id, SEL, UIEvent*))method_getImplementation(sendMethod);
     method_setImplementation(sendMethod, (IMP)swizzled_sendEvent);
