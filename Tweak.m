@@ -1,5 +1,5 @@
 // ==========================================
-// Tweak.m - 通用去开屏广告插件（最终完美版）
+// Tweak.m - 通用去开屏广告插件（最终稳定版）
 // 适用于 iOS 16.6 + TrollStore
 // ==========================================
 
@@ -65,6 +65,15 @@ static void replaceInstanceMethod(Class cls, SEL sel, id impBlock, IMP *origPtr)
     IMP imp = imp_implementationWithBlock(impBlock);
     if(origPtr) *origPtr = method_setImplementation(m, imp);
     else method_setImplementation(m, imp);
+}
+
+// 从触摸视图向上查找按钮
+static UIButton *findButtonFromView(UIView *view) {
+    while (view) {
+        if ([view isKindOfClass:[UIButton class]]) return (UIButton *)view;
+        view = view.superview;
+    }
+    return nil;
 }
 
 // 获取除悬浮窗外最高层级窗口
@@ -161,33 +170,34 @@ static UIView *findViewWithClass(UIView *root, NSString *className) {
     return nil;
 }
 
-// ========== 学习模式：降低悬浮窗层级让广告窗口可点击 ==========
+// ========== 学习模式：禁用悬浮窗交互，确保触摸直达广告 ==========
 static void startLearningMode() {
     if(learningMode) return; learningMode=YES; learnRecorded=NO;
     [floatingBtn setTitle:@"学习中" forState:UIControlStateNormal]; floatingBtn.backgroundColor=[UIColor blueColor];
-    floatingWindow.windowLevel = MAX_OTHER_WINDOW_LEVEL - 1;
+    // 关键：让悬浮窗完全不参与触摸事件分发
+    floatingWindow.userInteractionEnabled = NO;
     [learnTimeout invalidate];
     learnTimeout = [NSTimer scheduledTimerWithTimeInterval:LEARN_TIMEOUT repeats:NO block:^(NSTimer *_){ stopLearningMode(); }];
-    TESTLOG(@"📖 学习模式启动");
+    TESTLOG(@"📖 学习模式启动，悬浮窗交互已禁用");
 }
 
 static void stopLearningMode() {
     if(!learningMode) return; learningMode=NO;
     [learnTimeout invalidate]; learnTimeout=nil;
     [floatingBtn setTitle:@"去广告" forState:UIControlStateNormal]; floatingBtn.backgroundColor=[UIColor redColor];
-    ensureFloatingOnTop(); // 恢复最高层级
+    // 恢复交互和层级
+    floatingWindow.userInteractionEnabled = YES;
+    ensureFloatingOnTop();
     TESTLOG(@"📖 学习模式已退出");
 }
 
 // ========== 核心：限制其他窗口层级 + 悬浮窗置顶 ==========
 static void ensureFloatingOnTop(void) {
     if (!floatingWindow) return;
-    if (!learningMode) {
-        floatingWindow.windowLevel = MAX_OTHER_WINDOW_LEVEL + 1;
-    }
+    floatingWindow.windowLevel = MAX_OTHER_WINDOW_LEVEL + 1;
     floatingWindow.hidden = NO;
     floatingWindow.alpha = 1.0;
-    floatingWindow.userInteractionEnabled = YES;
+    floatingWindow.userInteractionEnabled = !learningMode; // 保持交互状态与学习模式一致
     if (floatingWindow.isKeyWindow) {
         [floatingWindow resignKeyWindow];
     }
@@ -259,18 +269,21 @@ static void (*orig_sendEvent)(id, SEL, UIEvent *);
 static void swizzled_sendEvent(UIApplication *self, SEL _cmd, UIEvent *event) {
     if(learningMode && !learnRecorded && event.type==UIEventTypeTouches) {
         for(UITouch *t in [event allTouches]) {
-            if(t.phase==UITouchPhaseEnded && t.tapCount==1 && [t.view isKindOfClass:[UIButton class]]) {
-                UIButton *btn = (UIButton *)t.view;
-                NSString *title = btn.titleLabel.text?:btn.accessibilityLabel?:@"";
-                if([title containsString:@"跳过"]||[title containsString:@"Skip"]||[title containsString:@"关闭"]) {
-                    learnRecorded=YES;
-                    UIView *container = findFullScreenContainer(btn);
-                    NSString *adClass = container ? NSStringFromClass([container class]) : @"UnknownAdView";
-                    addRule(adClass, NSStringFromClass([btn class]), title, btn.accessibilityLabel);
-                    stopLearningMode();
-                    showRuleSavedToast(); // 显示提示
-                    orig_sendEvent(self, _cmd, event);
-                    return;
+            if(t.phase==UITouchPhaseEnded && t.tapCount==1) {
+                // 向上查找按钮
+                UIButton *btn = findButtonFromView(t.view);
+                if(btn) {
+                    NSString *title = btn.titleLabel.text?:btn.accessibilityLabel?:@"";
+                    if([title containsString:@"跳过"]||[title containsString:@"Skip"]||[title containsString:@"关闭"]) {
+                        learnRecorded=YES;
+                        UIView *container = findFullScreenContainer(btn);
+                        NSString *adClass = container ? NSStringFromClass([container class]) : @"UnknownAdView";
+                        addRule(adClass, NSStringFromClass([btn class]), title, btn.accessibilityLabel);
+                        stopLearningMode();
+                        showRuleSavedToast();
+                        orig_sendEvent(self, _cmd, event);
+                        return;
+                    }
                 }
             }
         }
