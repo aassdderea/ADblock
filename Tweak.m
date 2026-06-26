@@ -1,5 +1,5 @@
 // ==========================================
-// Tweak.m - 通用去开屏广告插件（永不崩溃稳定版）
+// Tweak.m - 通用去开屏广告插件（最终无干扰版）
 // 适用于 iOS 16.6 + TrollStore
 // ==========================================
 
@@ -12,7 +12,6 @@
 
 #define TESTLOG(fmt, ...) NSLog(@"[AD-BLOCKER] " fmt, ##__VA_ARGS__)
 
-// 前向声明
 @class _FloatingWindow;
 static void ensureFloatingOnTop(void);
 static void scanForAdsInTopWindow(void);
@@ -23,7 +22,7 @@ static BOOL tryAutoSkipWithRules(UIView *adView);
 static void showLoadedToast(void);
 static void showToast(NSString *text);
 static void createFloatingWindow(void);
-static void showMarkAlert(void);
+static void showConfirmPanel(void);
 
 @interface _AdBlockGestureHandler : NSObject
 @property (nonatomic, copy) void (^panBlock)(UIPanGestureRecognizer *);
@@ -43,7 +42,7 @@ static void showMarkAlert(void);
 - (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
     if (self.actionButton && CGRectContainsPoint(self.actionButton.frame, point))
         return self.actionButton;
-    return nil; // 穿透
+    return nil;
 }
 - (BOOL)_canBecomeKeyWindow { return NO; }
 @end
@@ -51,6 +50,7 @@ static void showMarkAlert(void);
 static _FloatingWindow *floatingWindow = nil;
 static UIButton *floatingBtn = nil;
 static _AdBlockGestureHandler *gestureHandler = nil;
+static BOOL pendingMark = NO;
 
 static void replaceInstanceMethod(Class cls, SEL sel, id impBlock, IMP *origPtr) {
     Method m = class_getInstanceMethod(cls, sel);
@@ -75,28 +75,22 @@ static UIWindow * topWindowExcludingFloating(void) {
     return top;
 }
 
-static void simulateTapAtPoint(CGPoint screenPoint) {
-    CGFloat jitterX = ((CGFloat)arc4random() / UINT32_MAX) * 4 - 2;
-    CGFloat jitterY = ((CGFloat)arc4random() / UINT32_MAX) * 4 - 2;
-    CGPoint point = CGPointMake(screenPoint.x + jitterX, screenPoint.y + jitterY);
-    UIWindow *target = topWindowExcludingFloating();
-    if (!target) return;
-    CGPoint wp = [target convertPoint:point fromWindow:nil];
-    UIView *hit = [target hitTest:wp withEvent:nil] ?: target;
-    UITouch *touch = [[UITouch alloc] init];
-    [touch setValue:hit forKey:@"view"]; [touch setValue:@(wp) forKey:@"locationInWindow"];
-    [touch setValue:@(UITouchPhaseBegan) forKey:@"phase"]; [touch setValue:@(1) forKey:@"tapCount"];
-    [touch setValue:@(1.0) forKey:@"force"]; [touch setValue:@(5.0) forKey:@"majorRadius"];
-    NSTimeInterval ts = [[NSProcessInfo processInfo] systemUptime];
-    [touch setValue:@(ts) forKey:@"timestamp"];
-    UIEvent *ev = [[UIEvent alloc] init]; [ev setValue:@[touch] forKey:@"touches"]; [ev setValue:@(UIEventTypeTouches) forKey:@"type"]; [ev setValue:@(ts) forKey:@"timestamp"];
-    [hit touchesBegan:[NSSet setWithObject:touch] withEvent:ev];
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 0.05*NSEC_PER_SEC), dispatch_get_main_queue(), ^{
-        [touch setValue:@(UITouchPhaseEnded) forKey:@"phase"]; [touch setValue:@([[NSProcessInfo processInfo] systemUptime]) forKey:@"timestamp"];
-        UIEvent *endEv = [[UIEvent alloc] init]; [endEv setValue:@[touch] forKey:@"touches"]; [endEv setValue:@(UIEventTypeTouches) forKey:@"type"]; [endEv setValue:@([[NSProcessInfo processInfo] systemUptime]) forKey:@"timestamp"];
-        [hit touchesEnded:[NSSet setWithObject:touch] withEvent:endEv];
-    });
+// 递归查找全屏广告容器
+static UIView *findFullScreenAdView(UIView *root) {
+    CGRect screen = [UIScreen mainScreen].bounds;
+    if (root.frame.size.width >= screen.size.width * 0.8 &&
+        root.frame.size.height >= screen.size.height * 0.8) {
+        return root;
+    }
+    for (UIView *sub in root.subviews) {
+        UIView *found = findFullScreenAdView(sub);
+        if (found) return found;
+    }
+    return nil;
 }
+
+// 本版本不再需要模拟点击（标记时仅保存规则）
+static void simulateTapAtPoint(CGPoint screenPoint) { /* 保留空实现，供自动跳过使用 */ }
 
 static CGPoint screenPointForView(UIView *v) {
     CGRect r = [v convertRect:v.bounds toView:nil];
@@ -129,7 +123,32 @@ static BOOL tryAutoSkipWithRules(UIView *adView) {
         UIButton *skip = nil;
         for(UIView *s in adView.subviews) if([s isKindOfClass:[UIButton class]]&&[NSStringFromClass([s class]) isEqualToString:r[@"skipBtnClass"]]) { skip=(UIButton*)s; break; }
         if(!skip) skip = findSkipButtonInView(adView);
-        if(skip) simulateTapAtPoint(screenPointForView(skip)); else [adView removeFromSuperview];
+        if(skip) {
+            // 模拟点击跳过按钮
+            CGFloat jitterX = ((CGFloat)arc4random() / UINT32_MAX) * 4 - 2;
+            CGFloat jitterY = ((CGFloat)arc4random() / UINT32_MAX) * 4 - 2;
+            CGPoint point = CGPointMake(screenPointForView(skip).x + jitterX, screenPointForView(skip).y + jitterY);
+            UIWindow *target = topWindowExcludingFloating();
+            if (target) {
+                CGPoint wp = [target convertPoint:point fromWindow:nil];
+                UIView *hit = [target hitTest:wp withEvent:nil] ?: skip;
+                UITouch *touch = [[UITouch alloc] init];
+                [touch setValue:hit forKey:@"view"]; [touch setValue:@(wp) forKey:@"locationInWindow"];
+                [touch setValue:@(UITouchPhaseBegan) forKey:@"phase"]; [touch setValue:@(1) forKey:@"tapCount"];
+                [touch setValue:@(1.0) forKey:@"force"]; [touch setValue:@(5.0) forKey:@"majorRadius"];
+                NSTimeInterval ts = [[NSProcessInfo processInfo] systemUptime];
+                [touch setValue:@(ts) forKey:@"timestamp"];
+                UIEvent *ev = [[UIEvent alloc] init]; [ev setValue:@[touch] forKey:@"touches"]; [ev setValue:@(UIEventTypeTouches) forKey:@"type"]; [ev setValue:@(ts) forKey:@"timestamp"];
+                [hit touchesBegan:[NSSet setWithObject:touch] withEvent:ev];
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 0.05*NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+                    [touch setValue:@(UITouchPhaseEnded) forKey:@"phase"]; [touch setValue:@([[NSProcessInfo processInfo] systemUptime]) forKey:@"timestamp"];
+                    UIEvent *endEv = [[UIEvent alloc] init]; [endEv setValue:@[touch] forKey:@"touches"]; [endEv setValue:@(UIEventTypeTouches) forKey:@"type"]; [endEv setValue:@([[NSProcessInfo processInfo] systemUptime]) forKey:@"timestamp"];
+                    [hit touchesEnded:[NSSet setWithObject:touch] withEvent:endEv];
+                });
+            }
+        } else {
+            [adView removeFromSuperview];
+        }
         return YES;
     }
     return NO;
@@ -147,59 +166,79 @@ static UIView *findViewWithClass(UIView *root, NSString *className) {
     return nil;
 }
 
-// ========== 标记对话框 ==========
-static void showMarkAlert(void) {
+// ========== 自定义确认面板（不干扰广告窗口） ==========
+static void showConfirmPanel(void) {
+    UIView *panel = [[UIView alloc] initWithFrame:CGRectMake(40, 200, floatingWindow.bounds.size.width - 80, 150)];
+    panel.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.85];
+    panel.layer.cornerRadius = 12;
+    panel.alpha = 0;
+    [floatingWindow.rootViewController.view addSubview:panel];
+
+    UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(0, 20, panel.bounds.size.width, 30)];
+    title.text = @"确认标记此类广告？";
+    title.textColor = [UIColor whiteColor];
+    title.textAlignment = NSTextAlignmentCenter;
+    title.font = [UIFont boldSystemFontOfSize:18];
+    [panel addSubview:title];
+
+    // 显示识别的类名
     UIWindow *top = topWindowExcludingFloating();
-    if (!top) return;
+    UIView *adView = top ? findFullScreenAdView(top.rootViewController.view ?: top) : nil;
+    NSString *className = adView ? NSStringFromClass([adView class]) : @"未知";
+    UILabel *subtitle = [[UILabel alloc] initWithFrame:CGRectMake(0, 55, panel.bounds.size.width, 20)];
+    subtitle.text = [NSString stringWithFormat:@"广告容器: %@", className];
+    subtitle.textColor = [UIColor lightGrayColor];
+    subtitle.textAlignment = NSTextAlignmentCenter;
+    subtitle.font = [UIFont systemFontOfSize:14];
+    [panel addSubview:subtitle];
 
-    UIView *rootView = top.rootViewController.view ?: top;
-    // 优先寻找全屏广告容器
-    UIView *adView = nil;
-    for (UIView *sub in rootView.subviews) {
-        if (sub.frame.size.width >= [UIScreen mainScreen].bounds.size.width * 0.8 &&
-            sub.frame.size.height >= [UIScreen mainScreen].bounds.size.height * 0.8) {
-            adView = sub;
-            break;
-        }
-    }
-    if (!adView) adView = rootView; // 兜底
+    UIButton *confirmBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+    confirmBtn.frame = CGRectMake(panel.bounds.size.width/2 - 80, 95, 70, 36);
+    [confirmBtn setTitle:@"确认" forState:UIControlStateNormal];
+    [confirmBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    confirmBtn.backgroundColor = [UIColor systemBlueColor];
+    confirmBtn.layer.cornerRadius = 8;
+    [panel addSubview:confirmBtn];
 
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"标记广告"
-                                                                   message:[NSString stringWithFormat:@"视图类名: %@\n是否自动跳过此类广告？", NSStringFromClass([adView class])]
-                                                            preferredStyle:UIAlertControllerStyleAlert];
-    [alert addAction:[UIAlertAction actionWithTitle:@"仅跳过本次" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
-        UIButton *skip = findSkipButtonInView(adView);
-        if (skip) simulateTapAtPoint(screenPointForView(skip));
-        else [adView removeFromSuperview];
-    }]];
-    [alert addAction:[UIAlertAction actionWithTitle:@"总是自动跳过" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
+    UIButton *cancelBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+    cancelBtn.frame = CGRectMake(panel.bounds.size.width/2 + 10, 95, 70, 36);
+    [cancelBtn setTitle:@"取消" forState:UIControlStateNormal];
+    [cancelBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    cancelBtn.backgroundColor = [UIColor grayColor];
+    cancelBtn.layer.cornerRadius = 8;
+    [panel addSubview:cancelBtn];
+
+    __weak UIView *weakPanel = panel;
+    confirmBtn addAction:[UIAction actionWithHandler:^(id _){
+        [weakPanel removeFromSuperview];
         UIButton *skip = findSkipButtonInView(adView);
         addRule(NSStringFromClass([adView class]),
                 skip ? NSStringFromClass([skip class]) : @"",
                 skip ? skip.titleLabel.text ?: @"" : @"",
                 skip ? skip.accessibilityLabel ?: @"" : @"");
-        if (skip) simulateTapAtPoint(screenPointForView(skip));
-        else [adView removeFromSuperview];
-        showToast(@"✅ 规则已保存");
-    }]];
-    [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+        showToast(@"✅ 规则已保存，下次自动跳过");
+        cancelPendingMark();
+    }] forControlEvents:UIControlEventTouchUpInside];
 
-    // 创建临时窗口展示 alert，显示后自动销毁
-    UIWindow *alertWin = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
-    alertWin.windowScene = top.windowScene;
-    alertWin.windowLevel = UIWindowLevelAlert + 1000;
-    alertWin.backgroundColor = [UIColor colorWithWhite:0 alpha:0.3];
-    alertWin.hidden = NO;
-    UIViewController *vc = [UIViewController new];
-    vc.view.backgroundColor = [UIColor clearColor];
-    alertWin.rootViewController = vc;
-    [alertWin makeKeyAndVisible];
-    [vc presentViewController:alert animated:YES completion:nil];
+    cancelBtn addAction:[UIAction actionWithHandler:^(id _){
+        [weakPanel removeFromSuperview];
+        cancelPendingMark();
+    }] forControlEvents:UIControlEventTouchUpInside];
 
-    // 30 秒后自动销毁（避免泄漏）
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(30 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        alertWin.hidden = YES;
-    });
+    [UIView animateWithDuration:0.25 animations:^{ panel.alpha = 1; }];
+}
+
+// ========== 标记状态管理 ==========
+static void enterPendingMark(void) {
+    pendingMark = YES;
+    [floatingBtn setTitle:@"待标记" forState:UIControlStateNormal];
+    floatingBtn.backgroundColor = [UIColor blueColor];
+}
+
+static void cancelPendingMark(void) {
+    pendingMark = NO;
+    [floatingBtn setTitle:@"去广告" forState:UIControlStateNormal];
+    floatingBtn.backgroundColor = [UIColor redColor];
 }
 
 // ========== 悬浮窗管理 ==========
@@ -234,7 +273,13 @@ static void createFloatingWindow() {
     btn.backgroundColor=[UIColor redColor]; btn.layer.cornerRadius=s/2; btn.layer.borderWidth=3; btn.layer.borderColor=[UIColor whiteColor].CGColor;
     btn.layer.shadowOffset=CGSizeMake(0,4); btn.layer.shadowOpacity=0.8;
     [btn setTitle:@"去广告" forState:UIControlStateNormal]; btn.titleLabel.font=[UIFont boldSystemFontOfSize:14];
-    [btn addAction:[UIAction actionWithHandler:^(id _){ scanForAdsInTopWindow(); }] forControlEvents:UIControlEventTouchUpInside];
+    [btn addAction:[UIAction actionWithHandler:^(id _){
+        if (pendingMark) {
+            showConfirmPanel();
+        } else {
+            scanForAdsInTopWindow();
+        }
+    }] forControlEvents:UIControlEventTouchUpInside];
 
     gestureHandler = [[_AdBlockGestureHandler alloc] init];
     gestureHandler.panBlock = ^(UIPanGestureRecognizer *g){
@@ -244,8 +289,8 @@ static void createFloatingWindow() {
     UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:gestureHandler action:@selector(handlePan:)];
     [btn addGestureRecognizer:pan];
     gestureHandler.longPressBlock = ^(UILongPressGestureRecognizer *g){
-        if(g.state == UIGestureRecognizerStateBegan) {
-            showMarkAlert(); // 长按直接弹出标记对话框
+        if(g.state == UIGestureRecognizerStateBegan && !pendingMark) {
+            enterPendingMark();
         }
     };
     UILongPressGestureRecognizer *lp = [[UILongPressGestureRecognizer alloc] initWithTarget:gestureHandler action:@selector(handleLongPress:)];
@@ -311,16 +356,6 @@ static void showLoadedToast() {
 }
 
 static void showToast(NSString *text) {
-    UIWindow *w = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
-    for (UIWindowScene *sc in [UIApplication sharedApplication].connectedScenes) {
-        if (sc.activationState == UISceneActivationStateForegroundActive) {
-            w.windowScene = sc; break;
-        }
-    }
-    w.windowLevel = UIWindowLevelAlert + 999;
-    w.backgroundColor = [UIColor clearColor];
-    w.userInteractionEnabled = NO;
-    w.hidden = NO;
     UILabel *l = [UILabel new];
     l.text = text;
     l.textColor = [UIColor whiteColor];
@@ -334,11 +369,11 @@ static void showToast(NSString *text) {
     f.size.width += 30;
     f.size.height += 16;
     l.frame = f;
-    l.center = CGPointMake(w.bounds.size.width / 2, w.bounds.size.height - 100);
-    [w addSubview:l];
+    l.center = CGPointMake(floatingWindow.bounds.size.width / 2, floatingWindow.bounds.size.height - 100);
+    [floatingWindow.rootViewController.view addSubview:l];
     l.alpha = 0;
     [UIView animateWithDuration:0.3 animations:^{ l.alpha = 1; } completion:^(BOOL done) {
-        [UIView animateWithDuration:0.3 delay:1.5 options:UIViewAnimationOptionCurveEaseOut animations:^{ l.alpha = 0; } completion:^(BOOL done) { w.hidden = YES; }];
+        [UIView animateWithDuration:0.3 delay:1.5 options:UIViewAnimationOptionCurveEaseOut animations:^{ l.alpha = 0; } completion:^(BOOL done) { [l removeFromSuperview]; }];
     }];
 }
 
