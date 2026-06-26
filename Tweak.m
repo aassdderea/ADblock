@@ -1,5 +1,5 @@
 // ==========================================
-// Tweak.m - 通用去开屏广告插件（最终完整版 + 长按强制标记）
+// Tweak.m - 通用去开屏广告插件（手势修复版）
 // 适用于 iOS 16.6 + TrollStore
 // ==========================================
 
@@ -14,19 +14,14 @@
 
 #define TESTLOG(fmt, ...) NSLog(@"[AD-BLOCKER] " fmt, ##__VA_ARGS__)
 
-// 手势辅助类（同时处理 pan 和 long press）
+// 手势辅助类
 @interface _AdBlockGestureHandler : NSObject
 @property (nonatomic, copy) void (^panBlock)(UIPanGestureRecognizer *);
 @property (nonatomic, copy) void (^longPressBlock)(UILongPressGestureRecognizer *);
-- (instancetype)initWithBlock:(void (^)(UIPanGestureRecognizer *))block;
 - (void)handlePan:(UIPanGestureRecognizer *)gesture;
 - (void)handleLongPress:(UILongPressGestureRecognizer *)gesture;
 @end
 @implementation _AdBlockGestureHandler
-- (instancetype)initWithBlock:(void (^)(UIPanGestureRecognizer *))block {
-    if (self = [super init]) _panBlock = block;
-    return self;
-}
 - (void)handlePan:(UIPanGestureRecognizer *)gesture {
     if (self.panBlock) self.panBlock(gesture);
 }
@@ -337,7 +332,7 @@ static void scanForAdsInTopWindow() {
     });
 }
 
-// ========== 强制标记当前最高窗口的顶层视图 ==========
+// ========== 强制标记顶层窗口 ==========
 static void forceMarkTopView(void) {
     UIWindow *top = nil;
     CGFloat maxLvl = -1;
@@ -365,9 +360,10 @@ static void forceMarkTopView(void) {
     showMarkUI(targetView);
 }
 
-// ========== 悬浮窗（穿透+防覆盖+长按强制标记） ==========
+// ========== 悬浮窗 ==========
 static _FloatingWindow *floatingWindow = nil;
 static UIButton *floatingBtn = nil;
+static _AdBlockGestureHandler *gestureHandler = nil; // 强引用防止释放
 
 static void createFloatingWindow(void) {
     if (floatingWindow) return;
@@ -425,14 +421,17 @@ static void createFloatingWindow(void) {
     btn.titleLabel.font = [UIFont boldSystemFontOfSize:14];
     btn.userInteractionEnabled = YES;
     
-    // 点击扫描
+    // 点击
     [btn addAction:[UIAction actionWithHandler:^(__kindof UIAction * _) {
         TESTLOG(@"🔘 按钮被点击，开始扫描广告");
         scanForAdsInTopWindow();
     }] forControlEvents:UIControlEventTouchUpInside];
     
-    // 拖动手势
-    _AdBlockGestureHandler *handler = [[_AdBlockGestureHandler alloc] initWithBlock:^(UIPanGestureRecognizer *gesture) {
+    // 创建手势处理器并强引用
+    gestureHandler = [[_AdBlockGestureHandler alloc] init];
+    
+    // 拖动
+    gestureHandler.panBlock = ^(UIPanGestureRecognizer *gesture) {
         static CGPoint start;
         if (gesture.state == UIGestureRecognizerStateBegan) {
             start = [gesture locationInView:btn];
@@ -441,19 +440,20 @@ static void createFloatingWindow(void) {
             btn.frame = CGRectMake(curr.x - start.x, curr.y - start.y,
                                    btn.frame.size.width, btn.frame.size.height);
         }
-    }];
-    UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:handler action:@selector(handlePan:)];
+    };
+    UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:gestureHandler action:@selector(handlePan:)];
     [btn addGestureRecognizer:pan];
     
-    // 长按手势：强制标记
-    handler.longPressBlock = ^(UILongPressGestureRecognizer *gesture) {
+    // 长按强制标记
+    gestureHandler.longPressBlock = ^(UILongPressGestureRecognizer *gesture) {
         if (gesture.state == UIGestureRecognizerStateBegan) {
             TESTLOG(@"📌 长按按钮，强制标记顶层窗口");
             forceMarkTopView();
         }
     };
-    UILongPressGestureRecognizer *longPress = [[UILongPressGestureRecognizer alloc] initWithTarget:handler action:@selector(handleLongPress:)];
+    UILongPressGestureRecognizer *longPress = [[UILongPressGestureRecognizer alloc] initWithTarget:gestureHandler action:@selector(handleLongPress:)];
     longPress.minimumPressDuration = LONG_PRESS_DURATION;
+    longPress.allowableMovement = 10; // 允许轻微移动仍触发长按
     [btn addGestureRecognizer:longPress];
     
     [floatingWindow.rootViewController.view addSubview:btn];
