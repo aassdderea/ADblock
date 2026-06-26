@@ -1,5 +1,5 @@
 // ==========================================
-// Tweak.m - 通用去开屏广告插件（层级限制终极版）
+// Tweak.m - 通用去开屏广告插件（最终完美版）
 // 适用于 iOS 16.6 + TrollStore
 // ==========================================
 
@@ -10,7 +10,7 @@
 #define HEURISTIC_CHECK_DELAY 1.5
 #define LONG_PRESS_DURATION   1.0
 #define LEARN_TIMEOUT         10.0
-#define MAX_OTHER_WINDOW_LEVEL 100000  // 其他窗口允许的最高层级
+#define MAX_OTHER_WINDOW_LEVEL 100000
 
 #define TESTLOG(fmt, ...) NSLog(@"[AD-BLOCKER] " fmt, ##__VA_ARGS__)
 
@@ -46,7 +46,7 @@ static void createFloatingWindow(void);
 - (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
     if (self.actionButton && CGRectContainsPoint(self.actionButton.frame, point))
         return self.actionButton;
-    return nil;
+    return nil; // 穿透
 }
 - (BOOL)_canBecomeKeyWindow { return NO; }
 @end
@@ -160,27 +160,34 @@ static UIView *findViewWithClass(UIView *root, NSString *className) {
     return nil;
 }
 
+// ========== 学习模式：降低悬浮窗层级让广告窗口可点击 ==========
 static void startLearningMode() {
     if(learningMode) return; learningMode=YES; learnRecorded=NO;
     [floatingBtn setTitle:@"学习中" forState:UIControlStateNormal]; floatingBtn.backgroundColor=[UIColor blueColor];
-    [learnTimeout invalidate]; learnTimeout = [NSTimer scheduledTimerWithTimeInterval:LEARN_TIMEOUT repeats:NO block:^(NSTimer *_){ stopLearningMode(); }];
+    // 将悬浮窗层级降到上限以下，让广告窗口处于比它高的位置（但仍被限制在 MAX_OTHER_WINDOW_LEVEL）
+    floatingWindow.windowLevel = MAX_OTHER_WINDOW_LEVEL - 1;
+    [learnTimeout invalidate];
+    learnTimeout = [NSTimer scheduledTimerWithTimeInterval:LEARN_TIMEOUT repeats:NO block:^(NSTimer *_){ stopLearningMode(); }];
     TESTLOG(@"📖 学习模式启动，请点击广告的跳过按钮");
 }
+
 static void stopLearningMode() {
-    if(!learningMode) return; learningMode=NO; [learnTimeout invalidate]; learnTimeout=nil;
+    if(!learningMode) return; learningMode=NO;
+    [learnTimeout invalidate]; learnTimeout=nil;
     [floatingBtn setTitle:@"去广告" forState:UIControlStateNormal]; floatingBtn.backgroundColor=[UIColor redColor];
-    ensureFloatingOnTop();
+    ensureFloatingOnTop(); // 恢复最高层级
     TESTLOG(@"📖 学习模式已退出");
 }
 
 // ========== 核心：限制其他窗口层级 + 悬浮窗置顶 ==========
 static void ensureFloatingOnTop(void) {
     if (!floatingWindow) return;
-    floatingWindow.windowLevel = MAX_OTHER_WINDOW_LEVEL + 1;
+    if (!learningMode) { // 学习模式中不调整层级
+        floatingWindow.windowLevel = MAX_OTHER_WINDOW_LEVEL + 1;
+    }
     floatingWindow.hidden = NO;
     floatingWindow.alpha = 1.0;
     floatingWindow.userInteractionEnabled = YES;
-    // 确保悬浮窗不成为 key window
     if (floatingWindow.isKeyWindow) {
         [floatingWindow resignKeyWindow];
     }
@@ -247,7 +254,7 @@ static void scanForAdsInTopWindow() {
     });
 }
 
-// ========== Hook 区域 ==========
+// ========== Hook sendEvent: 学习模式不再需要窗口限制判断 ==========
 static void (*orig_sendEvent)(id, SEL, UIEvent *);
 static void swizzled_sendEvent(UIApplication *self, SEL _cmd, UIEvent *event) {
     if(learningMode && !learnRecorded && event.type==UIEventTypeTouches) {
@@ -256,8 +263,6 @@ static void swizzled_sendEvent(UIApplication *self, SEL _cmd, UIEvent *event) {
                 UIButton *btn = (UIButton *)t.view;
                 NSString *title = btn.titleLabel.text?:btn.accessibilityLabel?:@"";
                 if([title containsString:@"跳过"]||[title containsString:@"Skip"]||[title containsString:@"关闭"]) {
-                    UIWindow *topWin = topWindowExcludingFloating();
-                    if (t.window != topWin) break;
                     learnRecorded=YES;
                     UIView *container = findFullScreenContainer(btn);
                     NSString *adClass = container ? NSStringFromClass([container class]) : @"UnknownAdView";
@@ -272,17 +277,16 @@ static void swizzled_sendEvent(UIApplication *self, SEL _cmd, UIEvent *event) {
     orig_sendEvent(self, _cmd, event);
 }
 
-// 主动限制其他窗口的最高层级
+// ========== 主动限制其他窗口层级 ==========
 static void (*orig_setWindowLevel)(id, SEL, CGFloat);
 static void swizzled_setWindowLevel(UIWindow *self, SEL _cmd, CGFloat level) {
     if (self != floatingWindow && level > MAX_OTHER_WINDOW_LEVEL) {
-        level = MAX_OTHER_WINDOW_LEVEL;  // 强制压低
-        TESTLOG(@"🔻 窗口 %@ 试图设置层级 %.0f，已限制为 %d", NSStringFromClass([self class]), level, MAX_OTHER_WINDOW_LEVEL);
+        level = MAX_OTHER_WINDOW_LEVEL;
     }
     orig_setWindowLevel(self, _cmd, level);
-    if (self == floatingWindow) return;
-    // 任何窗口层级变化后，确保悬浮窗是最高的
-    ensureFloatingOnTop();
+    if (self != floatingWindow && !learningMode) {
+        ensureFloatingOnTop();
+    }
 }
 
 static void (*orig_setHidden)(id, SEL, BOOL);
@@ -300,13 +304,13 @@ static void swizzled_removeFromSuperview(UIWindow *self, SEL _cmd) {
 static void (*orig_makeKeyAndVisible)(id, SEL);
 static void swizzled_makeKeyAndVisible(UIWindow *self, SEL _cmd) {
     orig_makeKeyAndVisible(self, _cmd);
-    if(self != floatingWindow) ensureFloatingOnTop();
+    if(self != floatingWindow && !learningMode) ensureFloatingOnTop();
 }
 
 static void (*orig_makeKeyWindow)(id, SEL);
 static void swizzled_makeKeyWindow(UIWindow *self, SEL _cmd) {
     orig_makeKeyWindow(self, _cmd);
-    if(self != floatingWindow) ensureFloatingOnTop();
+    if(self != floatingWindow && !learningMode) ensureFloatingOnTop();
 }
 
 // Toast
