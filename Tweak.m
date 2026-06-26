@@ -1,5 +1,5 @@
 // ==========================================
-// Tweak.m - 通用去开屏广告插件（稳定版）
+// Tweak.m - 通用去开屏广告插件（稳定版 - 已修复编译错误）
 // 适用于 TrollStore + TrollFools 注入
 // ==========================================
 
@@ -12,6 +12,23 @@
 // ------------------------------
 
 #define TESTLOG(fmt, ...) NSLog(@"[AD-BLOCKER] " fmt, ##__VA_ARGS__)
+
+// ========== 辅助类：手势处理目标 ==========
+@interface _AdBlockGestureHandler : NSObject
+@property (nonatomic, copy) void (^panBlock)(UIPanGestureRecognizer *);
+- (instancetype)initWithBlock:(void (^)(UIPanGestureRecognizer *))block;
+@end
+@implementation _AdBlockGestureHandler
+- (instancetype)initWithBlock:(void (^)(UIPanGestureRecognizer *))block {
+    if (self = [super init]) {
+        _panBlock = block;
+    }
+    return self;
+}
+- (void)handlePan:(UIPanGestureRecognizer *)gesture {
+    if (self.panBlock) self.panBlock(gesture);
+}
+@end
 
 // ========== 方法替换（纯 Runtime） ==========
 static void replaceInstanceMethod(Class cls, SEL sel, id newImpBlock, IMP *origPtr) {
@@ -47,7 +64,8 @@ static void showTapIndicatorAtPoint(CGPoint screenPoint) {
 }
 
 static void simulateTapAtPoint(CGPoint screenPoint) {
-    showTapIndicatorAtPoint(screenPoint);  // 调试红圈，不需要可注释
+    // 调试红圈，不需要可注释
+    showTapIndicatorAtPoint(screenPoint);
     
     UIWindow *targetWindow = nil;
     CGFloat maxLevel = -1;
@@ -235,7 +253,7 @@ static void showMarkUI(UIView *suspiciousView) {
     markUIShowing = YES;
     
     UIWindow *alertWin = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
-    alertWin.windowLevel = UIWindowLevelAlert + 1000;  // 极高，盖住一切
+    alertWin.windowLevel = UIWindowLevelAlert + 1000;
     alertWin.backgroundColor = [UIColor colorWithWhite:0 alpha:0.4];
     alertWin.hidden = NO;
     
@@ -313,6 +331,8 @@ static void scanForAdsInTopWindow() {
                 }
             }
         }
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
         if (!topWindow) {
             for (UIWindow *w in [UIApplication sharedApplication].windows) {
                 if (!w.isHidden && w.alpha > 0.01 && w.windowLevel > maxLevel) {
@@ -321,6 +341,7 @@ static void scanForAdsInTopWindow() {
                 }
             }
         }
+#pragma clang diagnostic pop
         if (!topWindow) return;
         
         UIView *root = topWindow.rootViewController.view ?: topWindow;
@@ -369,9 +390,9 @@ static void addFloatingButton() {
     }] forControlEvents:UIControlEventTouchUpInside];
     [btnWin addSubview:btn];
     
-    // 支持拖动
-    __block CGPoint startPoint;
-    UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:nil action:^(UIPanGestureRecognizer *gesture) {
+    // 拖动支持（使用辅助类处理手势回调）
+    _AdBlockGestureHandler *handler = [[_AdBlockGestureHandler alloc] initWithBlock:^(UIPanGestureRecognizer *gesture) {
+        static CGPoint startPoint;
         if (gesture.state == UIGestureRecognizerStateBegan) {
             startPoint = [gesture locationInView:btnWin];
         } else {
@@ -380,6 +401,7 @@ static void addFloatingButton() {
             btnWin.frame = (CGRect){ .origin = newOrigin, .size = btnWin.frame.size };
         }
     }];
+    UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:handler action:@selector(handlePan:)];
     [btn addGestureRecognizer:pan];
 }
 
