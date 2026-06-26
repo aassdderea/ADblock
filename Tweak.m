@@ -1,17 +1,17 @@
 // ==========================================
-// Tweak.m - 通用去开屏广告插件（学习模式+反作弊增强版）
+// Tweak.m - 通用去开屏广告插件（最终稳定版）
 // 适用于 iOS 16.6 + TrollStore
 // ==========================================
 
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 
+// ---------- 可调参数 ----------
 #define SKIP_BTN_CHECK_DELAY  1.0
 #define HEURISTIC_CHECK_DELAY 1.5
 #define LONG_PRESS_DURATION   1.0
 #define LEARN_TIMEOUT         10.0
-#define SIMULATE_MIN_DELAY    0.3
-#define SIMULATE_MAX_DELAY    0.8
+// ------------------------------
 
 #define TESTLOG(fmt, ...) NSLog(@"[AD-BLOCKER] " fmt, ##__VA_ARGS__)
 
@@ -28,8 +28,6 @@ static void addRule(NSString *adClass, NSString *btnClass, NSString *titleKeywor
 static BOOL tryAutoSkipWithRules(UIView *adView);
 static void showLoadedToast(void);
 static void createFloatingWindow(void);
-static void simulateTapAtPoint(CGPoint screenPoint);
-static CGPoint screenPointForView(UIView *v);
 
 // ---------- 手势辅助类 ----------
 @interface _AdBlockGestureHandler : NSObject
@@ -72,58 +70,53 @@ static void replaceInstanceMethod(Class cls, SEL sel, id impBlock, IMP *origPtr)
     else method_setImplementation(m, imp);
 }
 
-// ---------- 触摸模拟（反作弊增强） ----------
+// ---------- 触摸模拟（高仿真，附带随机偏移和时间戳） ----------
 static void simulateTapAtPoint(CGPoint screenPoint) {
-    // 随机延迟 0.3~0.8 秒
-    double delay = SIMULATE_MIN_DELAY + ((double)arc4random() / UINT32_MAX) * (SIMULATE_MAX_DELAY - SIMULATE_MIN_DELAY);
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        // 随机坐标偏移 ±2 像素
-        CGFloat jitterX = ((CGFloat)arc4random() / UINT32_MAX) * 4 - 2;
-        CGFloat jitterY = ((CGFloat)arc4random() / UINT32_MAX) * 4 - 2;
-        CGPoint jitteredPoint = CGPointMake(screenPoint.x + jitterX, screenPoint.y + jitterY);
+    // 随机偏移 ±2px
+    CGFloat jitterX = ((CGFloat)arc4random() / UINT32_MAX) * 4 - 2;
+    CGFloat jitterY = ((CGFloat)arc4random() / UINT32_MAX) * 4 - 2;
+    CGPoint point = CGPointMake(screenPoint.x + jitterX, screenPoint.y + jitterY);
 
-        UIWindow *target = nil;
-        CGFloat maxL = -1;
-        if(@available(iOS 13.0,*)){
-            for(UIWindowScene *sc in [UIApplication sharedApplication].connectedScenes){
-                if(sc.activationState == UISceneActivationStateForegroundActive){
-                    for(UIWindow *w in sc.windows){
-                        if(!w.hidden && w.alpha>0.01 && w.windowLevel>maxL){ maxL=w.windowLevel; target=w; }
-                    }
+    UIWindow *target = nil;
+    CGFloat maxL = -1;
+    if(@available(iOS 13.0,*)){
+        for(UIWindowScene *sc in [UIApplication sharedApplication].connectedScenes){
+            if(sc.activationState == UISceneActivationStateForegroundActive){
+                for(UIWindow *w in sc.windows){
+                    if(!w.hidden && w.alpha>0.01 && w.windowLevel>maxL){ maxL=w.windowLevel; target=w; }
                 }
             }
         }
-        #pragma clang diagnostic push
-        #pragma clang diagnostic ignored "-Wdeprecated-declarations"
-        if(!target) for(UIWindow *w in [UIApplication sharedApplication].windows) if(!w.hidden&&w.alpha>0.01&&w.windowLevel>maxL){ maxL=w.windowLevel; target=w; }
-        #pragma clang diagnostic pop
-        if(!target) return;
-
-        CGPoint wp = [target convertPoint:jitteredPoint fromWindow:nil];
-        UIView *hit = [target hitTest:wp withEvent:nil] ?: target;
-
-        // 创建逼真的 UITouch
-        UITouch *touch = [[UITouch alloc] init];
-        [touch setValue:hit forKey:@"view"];
-        [touch setValue:@(wp) forKey:@"locationInWindow"];
-        [touch setValue:@(UITouchPhaseBegan) forKey:@"phase"];
-        [touch setValue:@(1.0) forKey:@"force"];           // 设置触摸压力
-        [touch setValue:@(5.0) forKey:@"majorRadius"];     // 触摸半径
-        [touch setValue:@(1) forKey:@"tapCount"];          // 点击次数
-
-        UIEvent *ev = [[UIEvent alloc] init];
-        [ev setValue:@[touch] forKey:@"touches"];
-        [ev setValue:@(UIEventTypeTouches) forKey:@"type"];
-        [ev setValue:@(CFAbsoluteTimeGetCurrent()) forKey:@"timestamp"];
-
-        // 发送事件到 hitView
-        [hit touchesBegan:[NSSet setWithObject:touch] withEvent:ev];
-
-        // 短暂延迟后触发结束
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            [touch setValue:@(UITouchPhaseEnded) forKey:@"phase"];
-            [hit touchesEnded:[NSSet setWithObject:touch] withEvent:ev];
-        });
+    }
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    if(!target) for(UIWindow *w in [UIApplication sharedApplication].windows) if(!w.hidden&&w.alpha>0.01&&w.windowLevel>maxL){ maxL=w.windowLevel; target=w; }
+#pragma clang diagnostic pop
+    if(!target) return;
+    CGPoint wp = [target convertPoint:point fromWindow:nil];
+    UIView *hit = [target hitTest:wp withEvent:nil] ?: target;
+    UITouch *touch = [[UITouch alloc] init];
+    [touch setValue:hit forKey:@"view"];
+    [touch setValue:@(wp) forKey:@"locationInWindow"];
+    [touch setValue:@(UITouchPhaseBegan) forKey:@"phase"];
+    [touch setValue:@(1) forKey:@"tapCount"];
+    [touch setValue:@(1.0) forKey:@"force"];
+    [touch setValue:@(5.0) forKey:@"majorRadius"];
+    NSTimeInterval timestamp = [[NSProcessInfo processInfo] systemUptime];
+    [touch setValue:@(timestamp) forKey:@"timestamp"];
+    UIEvent *ev = [[UIEvent alloc] init];
+    [ev setValue:@[touch] forKey:@"touches"];
+    [ev setValue:@(UIEventTypeTouches) forKey:@"type"];
+    [ev setValue:@(timestamp) forKey:@"timestamp"];
+    [hit touchesBegan:[NSSet setWithObject:touch] withEvent:ev];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05*NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        [touch setValue:@(UITouchPhaseEnded) forKey:@"phase"];
+        [touch setValue:@([[NSProcessInfo processInfo] systemUptime]) forKey:@"timestamp"];
+        UIEvent *endEv = [[UIEvent alloc] init];
+        [endEv setValue:@[touch] forKey:@"touches"];
+        [endEv setValue:@(UIEventTypeTouches) forKey:@"type"];
+        [endEv setValue:@([[NSProcessInfo processInfo] systemUptime]) forKey:@"timestamp"];
+        [hit touchesEnded:[NSSet setWithObject:touch] withEvent:endEv];
     });
 }
 
@@ -177,18 +170,12 @@ static BOOL tryAutoSkipWithRules(UIView *adView) {
     NSArray *rules = loadRules();
     for(NSDictionary *r in rules) {
         if(![NSStringFromClass([adView class]) isEqualToString:r[@"adViewClass"]]) continue;
-        // 查找跳过按钮
         UIButton *skip = nil;
         NSString *bCls = r[@"skipBtnClass"];
         if(bCls.length) for(UIView *s in adView.subviews) if([s isKindOfClass:[UIButton class]] && [NSStringFromClass([s class]) isEqualToString:bCls]) { skip=(UIButton*)s; break; }
-        if(!skip) skip = findSkipButtonInView(adView);
-        if(skip) {
-            TESTLOG(@"🎯 点击跳过按钮: %@", skip.titleLabel.text);
-            simulateTapAtPoint(screenPointForView(skip));
-        } else {
-            [adView removeFromSuperview];
-            TESTLOG(@"🗑️ 无跳过按钮，直接移除广告视图");
-        }
+        if(!skip) for(UIView *s in adView.subviews) { UIButton *b = findSkipButtonInView(s); if(b) { skip=b; break; } }
+        if(skip) simulateTapAtPoint(screenPointForView(skip));
+        else [adView removeFromSuperview];
         return YES;
     }
     return NO;
@@ -217,7 +204,7 @@ static UIView *findFullScreenContainer(UIView *v) {
     return nil;
 }
 
-// ---------- 递归查找指定类名视图 ----------
+// ---------- 递归按类名查找视图 ----------
 static UIView *findViewWithClass(UIView *root, NSString *className) {
     if ([NSStringFromClass([root class]) isEqualToString:className]) return root;
     for (UIView *sub in root.subviews) {
@@ -227,15 +214,15 @@ static UIView *findViewWithClass(UIView *root, NSString *className) {
     return nil;
 }
 
-// ---------- 学习模式 ----------
+// ---------- 学习模式（不降低层级，触摸穿透让用户点击广告） ----------
 static void startLearningMode() {
     if(learningMode) return;
     learningMode = YES;
     learnRecorded = NO;
     [floatingBtn setTitle:@"学习中" forState:UIControlStateNormal];
     floatingBtn.backgroundColor = [UIColor blueColor];
-    floatingWindow.windowLevel = UIWindowLevelNormal + 1;
-    TESTLOG(@"📖 学习模式启动，请点击广告的跳过按钮");
+    // 不降低悬浮窗层级，保持最高，利用触摸穿透
+    TESTLOG(@"📖 学习模式启动，请点击广告的跳过按钮（悬浮窗可见，点击穿透）");
     [learnTimeout invalidate];
     learnTimeout = [NSTimer scheduledTimerWithTimeInterval:LEARN_TIMEOUT repeats:NO block:^(NSTimer * _) {
         TESTLOG(@"⏰ 学习模式超时自动退出");
@@ -250,7 +237,7 @@ static void stopLearningMode() {
     learnTimeout = nil;
     [floatingBtn setTitle:@"去广告" forState:UIControlStateNormal];
     floatingBtn.backgroundColor = [UIColor redColor];
-    updateFloatingLevel();
+    updateFloatingLevel(); // 恢复悬浮窗层级
     TESTLOG(@"📖 学习模式已退出");
 }
 
@@ -261,14 +248,12 @@ static void updateFloatingLevel(void) {
     for(UIWindowScene *sc in [UIApplication sharedApplication].connectedScenes) {
         for(UIWindow *w in sc.windows) if(w!=floatingWindow && w.windowLevel>maxL) maxL=w.windowLevel;
     }
-    #pragma clang diagnostic push
-    #pragma clang diagnostic ignored "-Wdeprecated-declarations"
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
     for(UIWindow *w in [UIApplication sharedApplication].windows) if(w!=floatingWindow && w.windowLevel>maxL) maxL=w.windowLevel;
-    #pragma clang diagnostic pop
-    if(!learningMode) {
-        floatingWindow.windowLevel = maxL + 1;
-        [floatingWindow makeKeyAndVisible];
-    }
+#pragma clang diagnostic pop
+    floatingWindow.windowLevel = maxL + 1;
+    [floatingWindow makeKeyAndVisible];
 }
 
 // ---------- 悬浮窗创建 ----------
@@ -330,7 +315,7 @@ static void createFloatingWindow() {
     TESTLOG(@"🔴 悬浮窗创建完成");
 }
 
-// ---------- 扫描广告（递归匹配规则） ----------
+// ---------- 扫描广告（递归按类名查找并自动跳过） ----------
 static void scanForAdsInTopWindow() {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, HEURISTIC_CHECK_DELAY*NSEC_PER_SEC), dispatch_get_main_queue(), ^{
         UIWindow *top = nil; CGFloat maxL = -1;
@@ -343,9 +328,7 @@ static void scanForAdsInTopWindow() {
 
         NSArray *rules = loadRules();
         if (!rules.count) return;
-
         UIView *rootView = top.rootViewController.view ?: top;
-
         for (NSDictionary *rule in rules) {
             NSString *adClassName = rule[@"adViewClass"];
             if (!adClassName.length) continue;
@@ -359,14 +342,24 @@ static void scanForAdsInTopWindow() {
     });
 }
 
-// ---------- Hook sendEvent: 学习模式触摸记录 ----------
+// ---------- Hook sendEvent: 学习模式增强过滤 ----------
 static void (*orig_sendEvent)(id, SEL, UIEvent *);
 static void swizzled_sendEvent(UIApplication *self, SEL _cmd, UIEvent *event) {
     if(learningMode && !learnRecorded && event.type == UIEventTypeTouches) {
         NSSet *touches = [event allTouches];
         for(UITouch *touch in touches) {
-            if(touch.phase == UITouchPhaseEnded) {
+            if(touch.phase == UITouchPhaseEnded && touch.tapCount == 1) { // 仅单击
                 UIView *view = touch.view;
+                UIWindow *touchWindow = touch.window;
+                // 获取当前最高层级窗口
+                CGFloat maxLevel = -1;
+                UIWindow *topWin = nil;
+                for (UIWindowScene *sc in [UIApplication sharedApplication].connectedScenes) {
+                    for (UIWindow *w in sc.windows) {
+                        if (w.windowLevel > maxLevel) { maxLevel = w.windowLevel; topWin = w; }
+                    }
+                }
+                if (touchWindow != topWin) break; // 只记录最高层级窗口上的点击
                 if([view isKindOfClass:[UIButton class]]) {
                     UIButton *btn = (UIButton *)view;
                     NSString *title = btn.titleLabel.text ?: btn.accessibilityLabel ?: @"";
@@ -398,24 +391,7 @@ static void (*orig_makeKeyAndVisible)(id, SEL);
 static void swizzled_makeKeyAndVisible(UIWindow *self, SEL _cmd) {
     orig_makeKeyAndVisible(self, _cmd);
     if(self == floatingWindow) return;
-    if(!learningMode) updateFloatingLevel();
-    // 对于全屏高等级窗口，立即尝试执行已保存规则
-    if(self.frame.size.width >= [UIScreen mainScreen].bounds.size.width*0.8 &&
-       self.frame.size.height >= [UIScreen mainScreen].bounds.size.height*0.8 &&
-       self.windowLevel > UIWindowLevelNormal) {
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, SKIP_BTN_CHECK_DELAY*NSEC_PER_SEC), dispatch_get_main_queue(), ^{
-            // 遍历新窗口的所有子视图，递归查找已保存的广告类名
-            NSArray *rules = loadRules();
-            for (NSDictionary *rule in rules) {
-                NSString *adClassName = rule[@"adViewClass"];
-                if (!adClassName.length) continue;
-                UIView *adView = findViewWithClass(self, adClassName);
-                if (adView && tryAutoSkipWithRules(adView)) {
-                    TESTLOG(@"✅ 新窗口自动跳过: %@", adClassName);
-                }
-            }
-        });
-    }
+    updateFloatingLevel();
 }
 
 // ---------- Toast ----------
