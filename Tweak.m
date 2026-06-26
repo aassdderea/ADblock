@@ -1,6 +1,5 @@
 // ==========================================
-// Tweak.m - 通用去开屏广告插件（绝对可靠终结版）
-// 适用于 iOS 16.6 + TrollStore
+// Tweak.m - 终极调试暴力置顶版（请提供日志）
 // ==========================================
 
 #import <UIKit/UIKit.h>
@@ -14,7 +13,6 @@
 
 #define TESTLOG(fmt, ...) NSLog(@"[AD-BLOCKER] " fmt, ##__VA_ARGS__)
 
-// 前向声明
 @class _FloatingWindow;
 static void startLearningMode(void);
 static void stopLearningMode(void);
@@ -170,36 +168,37 @@ static void stopLearningMode() {
     ensureFloatingOnTop();
 }
 
-// ========== 绝对可靠的悬浮窗置顶与恢复 ==========
+// ========== 核心：暴力置顶 + 全局窗口打印 ==========
 static void ensureFloatingOnTop(void) {
     if (!floatingWindow) return;
-    // 强制恢复显示状态
+    // 1. 强制恢复显示状态
     floatingWindow.hidden = NO;
     floatingWindow.alpha = 1.0;
-    // 如果 windowScene 丢失，重新关联
     if (!floatingWindow.windowScene) {
         for (UIWindowScene *sc in [UIApplication sharedApplication].connectedScenes) {
             if (sc.activationState == UISceneActivationStateForegroundActive) {
-                floatingWindow.windowScene = sc;
-                break;
+                floatingWindow.windowScene = sc; break;
             }
         }
         if (!floatingWindow.windowScene) {
             for (UIWindowScene *sc in [UIApplication sharedApplication].connectedScenes) {
-                floatingWindow.windowScene = sc;
-                break;
+                floatingWindow.windowScene = sc; break;
             }
         }
     }
-    // 计算全局最高层级
-    CGFloat maxLevel = -1;
+    // 2. 暴力设置层级为天文数字
+    floatingWindow.windowLevel = CGFLOAT_MAX - 1;
+    
+    // 3. 打印所有窗口信息（用于调试，找到真正的广告窗口层级）
+    NSMutableString *dbg = [NSMutableString stringWithString:@"=== 当前所有窗口 ===\n"];
     for (UIWindowScene *sc in [UIApplication sharedApplication].connectedScenes) {
         for (UIWindow *w in sc.windows) {
-            if (w != floatingWindow && !w.hidden && w.windowLevel > maxLevel) maxLevel = w.windowLevel;
+            [dbg appendFormat:@"  %@ (ptr=%p): level=%.0f hidden=%d alpha=%.2f key=%d frame=%@\n",
+             NSStringFromClass([w class]), w, w.windowLevel, w.hidden, w.alpha, w.isKeyWindow, NSStringFromCGRect(w.frame)];
         }
     }
-    floatingWindow.windowLevel = maxLevel + 1;
-    TESTLOG(@"🔝 悬浮窗修复: level=%.0f hidden=%d alpha=%.1f", floatingWindow.windowLevel, floatingWindow.hidden, floatingWindow.alpha);
+    [dbg appendString:@"=======================\n"];
+    TESTLOG(@"%@", dbg);
 }
 
 static void startGuardTimer() {
@@ -297,7 +296,7 @@ static void swizzled_setHidden(UIWindow *self, SEL _cmd, BOOL hidden) {
 
 static void (*orig_removeFromSuperview)(id, SEL);
 static void swizzled_removeFromSuperview(UIWindow *self, SEL _cmd) {
-    if(self==floatingWindow) return; // 禁止移除
+    if(self==floatingWindow) return;
     orig_removeFromSuperview(self, _cmd);
 }
 
@@ -307,7 +306,6 @@ static void swizzled_makeKeyAndVisible(UIWindow *self, SEL _cmd) {
     if(self!=floatingWindow) ensureFloatingOnTop();
 }
 
-// 私有方法 Hook
 static void (*orig_makeKeyWindow)(id, SEL);
 static void swizzled_makeKeyWindow(UIWindow *self, SEL _cmd) {
     orig_makeKeyWindow(self, _cmd);
