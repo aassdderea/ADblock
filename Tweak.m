@@ -1,5 +1,6 @@
 // ==========================================
-// Tweak.m - 通用去开屏广告插件（最终彻底修复版）
+// Tweak.m - 通用去开屏广告插件（最终根治版）
+// 适用于 iOS 16.6 + TrollStore
 // ==========================================
 
 #import <UIKit/UIKit.h>
@@ -315,13 +316,100 @@ static void scanForAdsInTopWindow() {
     });
 }
 
-// ---------- UIWindow 监控 ----------
+// ========== 动态悬浮按钮（始终在最高窗口顶层） ==========
+static UIButton *floatingBtn = nil;
+
+static void ensureFloatingButtonOnTop(void) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        // 获取当前最高层级窗口
+        UIWindow *top = nil;
+        CGFloat maxLvl = -1;
+        if (@available(iOS 13.0, *)) {
+            for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
+                if (scene.activationState == UISceneActivationStateForegroundActive) {
+                    for (UIWindow *w in scene.windows) {
+                        if (!w.hidden && w.alpha > 0.01 && w.windowLevel > maxLvl) {
+                            maxLvl = w.windowLevel;
+                            top = w;
+                        }
+                    }
+                }
+            }
+        }
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+        if (!top) {
+            for (UIWindow *w in [UIApplication sharedApplication].windows) {
+                if (!w.hidden && w.alpha > 0.01 && w.windowLevel > maxLvl) {
+                    maxLvl = w.windowLevel;
+                    top = w;
+                }
+            }
+        }
+#pragma clang diagnostic pop
+        if (!top) return;
+
+        // 如果按钮不存在，创建并添加到 top
+        if (!floatingBtn) {
+            floatingBtn = [UIButton buttonWithType:UIButtonTypeCustom];
+            floatingBtn.frame = CGRectMake([UIScreen mainScreen].bounds.size.width - 70, 150, 60, 60);
+            floatingBtn.backgroundColor = [UIColor redColor];
+            floatingBtn.layer.cornerRadius = 30;
+            floatingBtn.layer.borderWidth = 3.0;
+            floatingBtn.layer.borderColor = [UIColor whiteColor].CGColor;
+            floatingBtn.layer.shadowColor = [UIColor blackColor].CGColor;
+            floatingBtn.layer.shadowOffset = CGSizeMake(0, 4);
+            floatingBtn.layer.shadowOpacity = 0.8;
+            [floatingBtn setTitle:@"去广告" forState:UIControlStateNormal];
+            floatingBtn.titleLabel.font = [UIFont boldSystemFontOfSize:14];
+            floatingBtn.layer.zPosition = CGFLOAT_MAX;
+
+            [floatingBtn addAction:[UIAction actionWithHandler:^(__kindof UIAction * _) {
+                TESTLOG(@"🔘 按钮被点击，开始扫描广告");
+                scanForAdsInTopWindow();
+            }] forControlEvents:UIControlEventTouchUpInside];
+
+            // 拖动支持
+            _AdBlockGestureHandler *handler = [[_AdBlockGestureHandler alloc] initWithBlock:^(UIPanGestureRecognizer *gesture) {
+                static CGPoint start;
+                if (gesture.state == UIGestureRecognizerStateBegan) {
+                    start = [gesture locationInView:floatingBtn];
+                } else {
+                    CGPoint curr = [gesture locationInView:floatingBtn.superview];
+                    floatingBtn.frame = CGRectMake(curr.x - start.x, curr.y - start.y,
+                                                  floatingBtn.frame.size.width, floatingBtn.frame.size.height);
+                }
+            }];
+            UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:handler action:@selector(handlePan:)];
+            [floatingBtn addGestureRecognizer:pan];
+        }
+
+        // 确保按钮在最高窗口的顶层视图上
+        UIView *container = top.rootViewController.view ?: top;
+        if (floatingBtn.superview != container) {
+            [floatingBtn removeFromSuperview];
+            [container addSubview:floatingBtn];
+            // 设置按钮坐标相对于 container 的左上角（避免坐标转换错乱）
+            CGRect screenBounds = [UIScreen mainScreen].bounds;
+            floatingBtn.frame = CGRectMake(screenBounds.size.width - 70, 150, 60, 60);
+        }
+        floatingBtn.layer.zPosition = CGFLOAT_MAX;
+        TESTLOG(@"🔴 按钮已置于窗口 (level: %.0f) 顶层", top.windowLevel);
+    });
+}
+
+// ---------- 监控新窗口，动态移植按钮 ----------
 static void (*orig_makeKeyAndVisible)(id, SEL);
 static void swizzled_makeKeyAndVisible(UIWindow *self, SEL _cmd) {
     orig_makeKeyAndVisible(self, _cmd);
-    if (self.frame.size.width >= [UIScreen mainScreen].bounds.size.width*0.8 &&
-        self.frame.size.height >= [UIScreen mainScreen].bounds.size.height*0.8 &&
-        self.windowLevel > UIWindowLevelNormal + 1) {
+
+    // 如果是全屏高等级窗口（很可能是广告窗口），立即把按钮移到它上面
+    if (self.frame.size.width >= [UIScreen mainScreen].bounds.size.width * 0.8 &&
+        self.frame.size.height >= [UIScreen mainScreen].bounds.size.height * 0.8 &&
+        self.windowLevel > UIWindowLevelNormal) {
+        ensureFloatingButtonOnTop();
+
+        // 同时进行广告检测
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(SKIP_BTN_CHECK_DELAY * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             for (UIView *sub in self.subviews) {
                 if (isLikelyAdView(sub)) {
@@ -331,87 +419,6 @@ static void swizzled_makeKeyAndVisible(UIWindow *self, SEL _cmd) {
             }
         });
     }
-}
-
-// ========== 悬浮按钮（彻底修复） ==========
-static UIWindow *floatingWindow = nil;
-static BOOL floatingButtonAdded = NO;
-
-static void addFloatingButton() {
-    if (floatingButtonAdded) return;
-
-    // 获取可用 windowScene
-    UIWindowScene *scene = nil;
-    if (@available(iOS 13.0, *)) {
-        for (UIScene *s in [UIApplication sharedApplication].connectedScenes) {
-            if ([s isKindOfClass:[UIWindowScene class]] && s.activationState == UISceneActivationStateForegroundActive) {
-                scene = (UIWindowScene *)s;
-                break;
-            }
-        }
-        if (!scene) {
-            for (UIScene *s in [UIApplication sharedApplication].connectedScenes) {
-                if ([s isKindOfClass:[UIWindowScene class]]) {
-                    scene = (UIWindowScene *)s;
-                    break;
-                }
-            }
-        }
-    }
-
-    // 创建独立悬浮窗
-    UIWindow *btnWin = [[UIWindow alloc] initWithFrame:CGRectMake([UIScreen mainScreen].bounds.size.width - 70, 150, 60, 60)];
-    if (scene) btnWin.windowScene = scene;
-    btnWin.windowLevel = UIWindowLevelAlert + 10000;   // 极高，永不遮挡
-    btnWin.backgroundColor = [UIColor clearColor];
-    btnWin.userInteractionEnabled = YES;
-
-    // 关键：必须设置 rootViewController，否则子视图不显示
-    UIViewController *rootVC = [[UIViewController alloc] init];
-    rootVC.view.backgroundColor = [UIColor clearColor];
-    rootVC.view.userInteractionEnabled = YES;
-    btnWin.rootViewController = rootVC;
-
-    btnWin.hidden = NO;
-    [btnWin makeKeyAndVisible];
-
-    // 创建红色按钮
-    UIButton *btn = [UIButton buttonWithType:UIButtonTypeCustom];
-    btn.frame = CGRectMake(0, 0, 60, 60);
-    btn.backgroundColor = [UIColor redColor];
-    btn.layer.cornerRadius = 30;
-    btn.layer.borderWidth = 3.0;
-    btn.layer.borderColor = [UIColor whiteColor].CGColor;
-    btn.layer.shadowColor = [UIColor blackColor].CGColor;
-    btn.layer.shadowOffset = CGSizeMake(0, 4);
-    btn.layer.shadowOpacity = 0.8;
-    [btn setTitle:@"去广告" forState:UIControlStateNormal];
-    btn.titleLabel.font = [UIFont boldSystemFontOfSize:14];
-    btn.userInteractionEnabled = YES;
-
-    [btn addAction:[UIAction actionWithHandler:^(__kindof UIAction * _) {
-        TESTLOG(@"🔘 按钮被点击，开始扫描广告");
-        scanForAdsInTopWindow();
-    }] forControlEvents:UIControlEventTouchUpInside];
-
-    // 拖动支持
-    _AdBlockGestureHandler *handler = [[_AdBlockGestureHandler alloc] initWithBlock:^(UIPanGestureRecognizer *gesture) {
-        static CGPoint start;
-        if (gesture.state == UIGestureRecognizerStateBegan) {
-            start = [gesture locationInView:btnWin];
-        } else {
-            CGPoint curr = [gesture locationInView:nil];
-            btnWin.frame = CGRectMake(curr.x - start.x, curr.y - start.y,
-                                      btnWin.frame.size.width, btnWin.frame.size.height);
-        }
-    }];
-    UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:handler action:@selector(handlePan:)];
-    [btn addGestureRecognizer:pan];
-
-    [rootVC.view addSubview:btn];
-    floatingWindow = btnWin;
-    floatingButtonAdded = YES;
-    TESTLOG(@"🔴 独立悬浮窗口已创建 (level: %.0f)", btnWin.windowLevel);
 }
 
 // ---------- Toast 提示 ----------
@@ -475,13 +482,8 @@ static void adblock_init() {
     [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidBecomeActiveNotification
                                                       object:nil queue:[NSOperationQueue mainQueue]
                                                   usingBlock:^(NSNotification * _) {
-        // 确保悬浮窗显示
-        if (floatingWindow && floatingWindow.hidden) {
-            floatingWindow.hidden = NO;
-            [floatingWindow makeKeyAndVisible];
-        }
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            addFloatingButton();  // 如果未创建则创建
+            ensureFloatingButtonOnTop();  // 动态放置按钮
             scanForAdsInTopWindow();
         });
     }];
