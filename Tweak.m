@@ -1,5 +1,5 @@
 // ==========================================
-// Tweak.m - 通用去开屏广告插件（按钮穿透修复版）
+// Tweak.m - 通用去开屏广告插件（最终完整版 + 长按强制标记）
 // 适用于 iOS 16.6 + TrollStore
 // ==========================================
 
@@ -9,6 +9,7 @@
 // ---------- 可调参数 ----------
 #define SKIP_BTN_CHECK_DELAY  1.0
 #define HEURISTIC_CHECK_DELAY 1.5
+#define LONG_PRESS_DURATION   1.0   // 长按触发时间
 // ------------------------------
 
 #define TESTLOG(fmt, ...) NSLog(@"[AD-BLOCKER] " fmt, ##__VA_ARGS__)
@@ -33,11 +34,9 @@
 @end
 @implementation _FloatingWindow
 - (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
-    // 如果按钮存在且触摸点在按钮内，返回按钮
     if (self.actionButton && CGRectContainsPoint(self.actionButton.frame, point)) {
         return self.actionButton;
     }
-    // 其他区域返回 nil，让下层窗口处理触摸
     return nil;
 }
 @end
@@ -331,16 +330,43 @@ static void scanForAdsInTopWindow() {
     });
 }
 
-// ========== 悬浮窗（穿透+防覆盖） ==========
+// ========== 悬浮窗（穿透+防覆盖+长按强制标记） ==========
 static _FloatingWindow *floatingWindow = nil;
 static UIButton *floatingBtn = nil;
+
+// 强制标记当前最高窗口的顶层视图
+static void forceMarkTopView(void) {
+    UIWindow *top = nil;
+    CGFloat maxLvl = -1;
+    if (@available(iOS 13.0, *)) {
+        for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
+            for (UIWindow *w in scene.windows) {
+                if (!w.hidden && w.alpha>0.01 && w.windowLevel>maxLvl) {
+                    maxLvl = w.windowLevel; top = w;
+                }
+            }
+        }
+    }
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    if (!top) {
+        for (UIWindow *w in [UIApplication sharedApplication].windows) {
+            if (!w.hidden && w.alpha>0.01 && w.windowLevel>maxLvl) {
+                maxLvl = w.windowLevel; top = w;
+            }
+        }
+    }
+#pragma clang diagnostic pop
+    if (!top) return;
+    UIView *targetView = top.rootViewController.view ?: top;
+    showMarkUI(targetView);
+}
 
 static void createFloatingWindow(void) {
     if (floatingWindow) return;
     
     floatingWindow = [[_FloatingWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
     
-    // 关联 Scene
     if (@available(iOS 13.0, *)) {
         for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
             if (scene.activationState == UISceneActivationStateForegroundActive) {
@@ -358,7 +384,6 @@ static void createFloatingWindow(void) {
         }
     }
     
-    // 计算当前最高窗口 level，并设置为 +1
     CGFloat maxLevel = -1;
     for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
         for (UIWindow *w in scene.windows) {
@@ -379,7 +404,6 @@ static void createFloatingWindow(void) {
     floatingWindow.hidden = NO;
     [floatingWindow makeKeyAndVisible];
     
-    // 创建按钮
     UIButton *btn = [UIButton buttonWithType:UIButtonTypeCustom];
     CGFloat btnSize = 60;
     btn.frame = CGRectMake([UIScreen mainScreen].bounds.size.width - btnSize - 20, 150, btnSize, btnSize);
@@ -394,12 +418,13 @@ static void createFloatingWindow(void) {
     btn.titleLabel.font = [UIFont boldSystemFontOfSize:14];
     btn.userInteractionEnabled = YES;
     
+    // 点击扫描
     [btn addAction:[UIAction actionWithHandler:^(__kindof UIAction * _) {
         TESTLOG(@"🔘 按钮被点击，开始扫描广告");
         scanForAdsInTopWindow();
     }] forControlEvents:UIControlEventTouchUpInside];
     
-    // 拖动支持
+    // 拖动手势
     _AdBlockGestureHandler *handler = [[_AdBlockGestureHandler alloc] initWithBlock:^(UIPanGestureRecognizer *gesture) {
         static CGPoint start;
         if (gesture.state == UIGestureRecognizerStateBegan) {
@@ -413,14 +438,23 @@ static void createFloatingWindow(void) {
     UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:handler action:@selector(handlePan:)];
     [btn addGestureRecognizer:pan];
     
+    // 长按手势：强制标记当前顶层窗口
+    UILongPressGestureRecognizer *longPress = [[UILongPressGestureRecognizer alloc] initWithTarget:nil action:^(UILongPressGestureRecognizer *gesture) {
+        if (gesture.state == UIGestureRecognizerStateBegan) {
+            TESTLOG(@"📌 长按按钮，强制标记顶层窗口");
+            forceMarkTopView();
+        }
+    }];
+    longPress.minimumPressDuration = LONG_PRESS_DURATION;
+    [btn addGestureRecognizer:longPress];
+    
     [floatingWindow.rootViewController.view addSubview:btn];
     floatingWindow.actionButton = btn;
     floatingBtn = btn;
     
-    TESTLOG(@"🔴 悬浮窗已创建 (level: %.0f)", floatingWindow.windowLevel);
+    TESTLOG(@"🔴 悬浮窗已创建 (level: %.0f) + 长按强制标记", floatingWindow.windowLevel);
 }
 
-// 动态更新悬浮窗 level，以防广告窗口出现
 static void updateFloatingLevel(void) {
     if (!floatingWindow) return;
     CGFloat maxLevel = -1;
@@ -444,14 +478,8 @@ static void updateFloatingLevel(void) {
 static void (*orig_makeKeyAndVisible)(id, SEL);
 static void swizzled_makeKeyAndVisible(UIWindow *self, SEL _cmd) {
     orig_makeKeyAndVisible(self, _cmd);
-    
-    // 忽略我们的悬浮窗
     if (self == floatingWindow) return;
-    
-    // 每次有窗口变为 key，立即更新悬浮窗 level，保证最高
     updateFloatingLevel();
-    
-    // 全屏高等级窗口检测广告
     if (self.frame.size.width >= [UIScreen mainScreen].bounds.size.width * 0.8 &&
         self.frame.size.height >= [UIScreen mainScreen].bounds.size.height * 0.8 &&
         self.windowLevel > UIWindowLevelNormal) {
