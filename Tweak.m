@@ -248,7 +248,7 @@ static BOOL _ab_tryDirectAction(UIButton *btn) {
 
         for (id target in targets) {
             if (![btn respondsToSelector:actionsForTargetSel]) continue;
-            NSArray *actions = ((NSArray *(*)(id, SEL, id, UIControlEvent))objc_msgSend)(
+            NSArray *actions = ((NSArray *(*)(id, SEL, id, NSUInteger))objc_msgSend)(
                 btn, actionsForTargetSel, target, UIControlEventTouchUpInside);
             for (NSString *actionName in actions ?: @[]) {
                 SEL sel = NSSelectorFromString(actionName);
