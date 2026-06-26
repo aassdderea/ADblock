@@ -59,6 +59,9 @@ static BOOL learningMode = NO;
 static NSTimer *learnTimeout = nil;
 static BOOL learnRecorded = NO;
 
+// 原始实现指针
+static void (*orig_UIWindow_sendTouchesForEvent)(id, SEL, NSSet *, UIEvent *) = NULL;
+
 static void replaceInstanceMethod(Class cls, SEL sel, id impBlock, IMP *origPtr) {
     Method m = class_getInstanceMethod(cls, sel);
     if(!m) return;
@@ -257,36 +260,7 @@ static void scanForAdsInTopWindow() {
     });
 }
 
-// ========== 底层钩子：UIWindow 的 _sendTouchesForEvent: ==========
-static void (*orig_UIWindow_sendTouchesForEvent)(id, SEL, NSSet *, UIEvent *);
-static void swizzled_UIWindow_sendTouchesForEvent(UIWindow *self, SEL _cmd, NSSet *touches, UIEvent *event) {
-    // 先调用原始实现，保证 App 正常响应
-    if (orig_UIWindow_sendTouchesForEvent) {
-        orig_UIWindow_sendTouchesForEvent(self, _cmd, touches, event);
-    }
-
-    // 学习模式下捕获跳过按钮点击
-    if (learningMode && !learnRecorded) {
-        for (UITouch *touch in touches) {
-            if (touch.phase == UITouchPhaseEnded && touch.tapCount == 1) {
-                UIButton *btn = findButtonFromView(touch.view);
-                if (btn) {
-                    NSString *title = btn.titleLabel.text ?: btn.accessibilityLabel ?: @"";
-                    if ([title containsString:@"跳过"] || [title containsString:@"Skip"] || [title containsString:@"关闭"]) {
-                        learnRecorded = YES;
-                        UIView *container = findFullScreenContainer(btn);
-                        NSString *adClass = container ? NSStringFromClass([container class]) : @"UnknownAdView";
-                        addRule(adClass, NSStringFromClass([btn class]), title, btn.accessibilityLabel);
-                        stopLearningMode();
-                        showRuleSavedToast();
-                        return;
-                    }
-                }
-            }
-        }
-    }
-}
-
+// ========== Hook：限制窗口层级 ==========
 static void (*orig_setWindowLevel)(id, SEL, CGFloat);
 static void swizzled_setWindowLevel(UIWindow *self, SEL _cmd, CGFloat level) {
     if (self != floatingWindow && level > MAX_OTHER_WINDOW_LEVEL) {
@@ -357,11 +331,11 @@ __attribute__((constructor))
 static void adblock_init() {
     applyKnownSDKHooks();
 
-    // Hook UIWindow 的 _sendTouchesForEvent:
+    // Hook UIWindow 的 _sendTouchesForEvent: 内联实现
     SEL sendTouchesSel = NSSelectorFromString(@"_sendTouchesForEvent:");
     Method sendTouchesMethod = class_getInstanceMethod([UIWindow class], sendTouchesSel);
     if (sendTouchesMethod) {
-        IMP newImp = imp_implementationWithBlock(^(id self, NSSet *touches, UIEvent *event) {
+        IMP newImp = imp_implementationWithBlock(^(UIWindow *self, NSSet *touches, UIEvent *event) {
             // 调用原始实现
             if (orig_UIWindow_sendTouchesForEvent) {
                 orig_UIWindow_sendTouchesForEvent(self, sendTouchesSel, touches, event);
