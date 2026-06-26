@@ -1,5 +1,5 @@
 // ==========================================
-// Tweak.m - 通用去开屏广告插件（手势修复版）
+// Tweak.m - 通用去开屏广告插件（弹窗自动消失修复版）
 // 适用于 iOS 16.6 + TrollStore
 // ==========================================
 
@@ -9,7 +9,7 @@
 // ---------- 可调参数 ----------
 #define SKIP_BTN_CHECK_DELAY  1.0
 #define HEURISTIC_CHECK_DELAY 1.5
-#define LONG_PRESS_DURATION   1.0   // 长按触发时间
+#define LONG_PRESS_DURATION   1.0
 // ------------------------------
 
 #define TESTLOG(fmt, ...) NSLog(@"[AD-BLOCKER] " fmt, ##__VA_ARGS__)
@@ -30,7 +30,7 @@
 }
 @end
 
-// ---------- 自定义窗口：只响应按钮区域触摸 ----------
+// 自定义窗口（触摸穿透）
 @interface _FloatingWindow : UIWindow
 @property (nonatomic, weak) UIButton *actionButton;
 @end
@@ -43,7 +43,7 @@
 }
 @end
 
-// ---------- 方法替换 ----------
+// 方法替换
 static void replaceInstanceMethod(Class cls, SEL sel, id newImpBlock, IMP *origPtr) {
     Method m = class_getInstanceMethod(cls, sel);
     if (!m) return;
@@ -52,7 +52,7 @@ static void replaceInstanceMethod(Class cls, SEL sel, id newImpBlock, IMP *origP
     else method_setImplementation(m, newImp);
 }
 
-// ---------- 触摸模拟 ----------
+// 触摸模拟
 static void showTapIndicatorAtPoint(CGPoint screenPoint) {
     CGFloat size = 40.0;
     UIWindow *indicatorWindow = [[UIWindow alloc] initWithFrame:CGRectMake(screenPoint.x - size/2, screenPoint.y - size/2, size, size)];
@@ -60,14 +60,12 @@ static void showTapIndicatorAtPoint(CGPoint screenPoint) {
     indicatorWindow.backgroundColor = [UIColor clearColor];
     indicatorWindow.userInteractionEnabled = NO;
     indicatorWindow.hidden = NO;
-    
     UIView *indicator = [[UIView alloc] initWithFrame:indicatorWindow.bounds];
     indicator.layer.cornerRadius = size / 2;
     indicator.layer.borderWidth = 3.0;
     indicator.layer.borderColor = [UIColor redColor].CGColor;
     indicator.backgroundColor = [[UIColor redColor] colorWithAlphaComponent:0.3];
     [indicatorWindow addSubview:indicator];
-    
     [UIView animateWithDuration:0.3 delay:0.3 options:UIViewAnimationOptionCurveEaseOut animations:^{
         indicator.alpha = 0.0;
         indicator.transform = CGAffineTransformMakeScale(1.5, 1.5);
@@ -77,8 +75,7 @@ static void showTapIndicatorAtPoint(CGPoint screenPoint) {
 }
 
 static void simulateTapAtPoint(CGPoint screenPoint) {
-    showTapIndicatorAtPoint(screenPoint); // 可注释
-    
+    showTapIndicatorAtPoint(screenPoint);
     UIWindow *targetWindow = nil;
     CGFloat maxLevel = -1;
     if (@available(iOS 13.0, *)) {
@@ -104,13 +101,10 @@ static void simulateTapAtPoint(CGPoint screenPoint) {
         }
     }
 #pragma clang diagnostic pop
-    
     if (!targetWindow) return;
-    
     CGPoint windowPoint = [targetWindow convertPoint:screenPoint fromWindow:nil];
     UIView *hitView = [targetWindow hitTest:windowPoint withEvent:nil];
     if (!hitView) hitView = targetWindow;
-    
     UITouch *touch = [[UITouch alloc] init];
     [touch setValue:hitView forKey:@"view"];
     [touch setValue:@(windowPoint) forKey:@"locationInWindow"];
@@ -118,7 +112,6 @@ static void simulateTapAtPoint(CGPoint screenPoint) {
     UIEvent *event = [[UIEvent alloc] init];
     [event setValue:@[touch] forKey:@"touches"];
     [event setValue:@(UIEventTypeTouches) forKey:@"type"];
-    
     [hitView touchesBegan:[NSSet setWithObject:touch] withEvent:event];
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         [touch setValue:@(UITouchPhaseEnded) forKey:@"phase"];
@@ -148,7 +141,7 @@ static CGPoint screenPointForView(UIView *view) {
     return CGPointMake(CGRectGetMidX(frameInScreen), CGRectGetMidY(frameInScreen));
 }
 
-// ---------- 已知 SDK 拦截 ----------
+// 已知 SDK 拦截
 static BOOL knownHookApplied = NO;
 static void applyKnownSDKHooks() {
     if (knownHookApplied) return;
@@ -174,7 +167,7 @@ static void applyKnownSDKHooks() {
     }, NULL);
 }
 
-// ---------- 规则持久化 ----------
+// 规则持久化
 static NSString *rulesPath() {
     return [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject
             stringByAppendingPathComponent:@"com.adblocker.rules.plist"];
@@ -218,12 +211,15 @@ static BOOL tryAutoSkipWithRules(UIView *adView) {
     return NO;
 }
 
-// ---------- 标记弹窗 ----------
+// 标记弹窗（修复自动消失）
 static BOOL markUIShowing = NO;
+static UIWindow *markWindow = nil;  // 强引用弹窗窗口
+
 static void showMarkUI(UIView *adView) {
     if (markUIShowing) return;
     markUIShowing = YES;
-    
+
+    // 获取当前最高窗口的 scene
     UIWindow *topWin = nil;
     CGFloat maxLvl = -1;
     if (@available(iOS 13.0, *)) {
@@ -245,45 +241,53 @@ static void showMarkUI(UIView *adView) {
         }
     }
 #pragma clang diagnostic pop
-    
-    UIWindow *win = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
+
+    // 创建弹窗窗口，level 极高，并强引用防止释放
+    markWindow = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
     if (topWin) {
         if (@available(iOS 13.0, *)) {
-            win.windowScene = topWin.windowScene;
+            markWindow.windowScene = topWin.windowScene;
         }
     }
-    win.windowLevel = UIWindowLevelAlert + 1000;
-    win.backgroundColor = [UIColor colorWithWhite:0 alpha:0.4];
-    win.hidden = NO;
+    markWindow.windowLevel = UIWindowLevelAlert + 10000; // 高于悬浮窗
+    markWindow.backgroundColor = [UIColor colorWithWhite:0 alpha:0.4];
+    markWindow.hidden = NO;
     UIViewController *vc = [UIViewController new];
     vc.view.backgroundColor = [UIColor clearColor];
-    win.rootViewController = vc;
-    
+    markWindow.rootViewController = vc;
+    [markWindow makeKeyAndVisible];   // 成为 key window
+
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"发现疑似开屏广告"
                                                                    message:@"要自动跳过这类广告吗？"
                                                             preferredStyle:UIAlertControllerStyleAlert];
     __weak UIView *weakAd = adView;
-    __weak UIWindow *weakWin = win;
-    [alert addAction:[UIAlertAction actionWithTitle:@"仅跳过本次" style:UIAlertActionStyleDefault handler:^(UIAlertAction *_) {
+    __weak UIWindow *weakWin = markWindow;
+    UIAlertAction *skipOnce = [UIAlertAction actionWithTitle:@"仅跳过本次" style:UIAlertActionStyleDefault handler:^(UIAlertAction *_) {
         markUIShowing = NO;
         UIButton *b = findSkipButtonInView(weakAd);
         if (b) simulateTapAtPoint(screenPointForView(b));
         weakWin.hidden = YES;
-    }]];
-    [alert addAction:[UIAlertAction actionWithTitle:@"总是自动跳过" style:UIAlertActionStyleDefault handler:^(UIAlertAction *_) {
+        markWindow = nil;
+    }];
+    UIAlertAction *skipAlways = [UIAlertAction actionWithTitle:@"总是自动跳过" style:UIAlertActionStyleDefault handler:^(UIAlertAction *_) {
         markUIShowing = NO;
         UIButton *b = findSkipButtonInView(weakAd);
         if (b) { addRule(weakAd, b); simulateTapAtPoint(screenPointForView(b)); }
         weakWin.hidden = YES;
-    }]];
-    [alert addAction:[UIAlertAction actionWithTitle:@"不是广告" style:UIAlertActionStyleCancel handler:^(UIAlertAction *_) {
+        markWindow = nil;
+    }];
+    UIAlertAction *notAd = [UIAlertAction actionWithTitle:@"不是广告" style:UIAlertActionStyleCancel handler:^(UIAlertAction *_) {
         markUIShowing = NO;
         weakWin.hidden = YES;
-    }]];
+        markWindow = nil;
+    }];
+    [alert addAction:skipOnce];
+    [alert addAction:skipAlways];
+    [alert addAction:notAd];
     [vc presentViewController:alert animated:YES completion:nil];
 }
 
-// ---------- 启发式检测 ----------
+// 启发式检测
 static BOOL isLikelyAdView(UIView *view) {
     CGRect bounds = [UIScreen mainScreen].bounds;
     if (view.frame.size.width < bounds.size.width*0.8 || view.frame.size.height < bounds.size.height*0.8)
@@ -321,7 +325,6 @@ static void scanForAdsInTopWindow() {
         }
 #pragma clang diagnostic pop
         if (!top) return;
-        
         NSArray *subviews = top.rootViewController.view ? top.rootViewController.view.subviews : top.subviews;
         for (UIView *sub in subviews) {
             if (isLikelyAdView(sub)) {
@@ -332,7 +335,7 @@ static void scanForAdsInTopWindow() {
     });
 }
 
-// ========== 强制标记顶层窗口 ==========
+// 强制标记顶层窗口
 static void forceMarkTopView(void) {
     UIWindow *top = nil;
     CGFloat maxLvl = -1;
@@ -360,16 +363,14 @@ static void forceMarkTopView(void) {
     showMarkUI(targetView);
 }
 
-// ========== 悬浮窗 ==========
+// 悬浮窗
 static _FloatingWindow *floatingWindow = nil;
 static UIButton *floatingBtn = nil;
-static _AdBlockGestureHandler *gestureHandler = nil; // 强引用防止释放
+static _AdBlockGestureHandler *gestureHandler = nil;
 
 static void createFloatingWindow(void) {
     if (floatingWindow) return;
-    
     floatingWindow = [[_FloatingWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
-    
     if (@available(iOS 13.0, *)) {
         for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
             if (scene.activationState == UISceneActivationStateForegroundActive) {
@@ -386,7 +387,6 @@ static void createFloatingWindow(void) {
             }
         }
     }
-    
     CGFloat maxLevel = -1;
     for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
         for (UIWindow *w in scene.windows) {
@@ -406,7 +406,7 @@ static void createFloatingWindow(void) {
     floatingWindow.rootViewController.view.backgroundColor = [UIColor clearColor];
     floatingWindow.hidden = NO;
     [floatingWindow makeKeyAndVisible];
-    
+
     UIButton *btn = [UIButton buttonWithType:UIButtonTypeCustom];
     CGFloat btnSize = 60;
     btn.frame = CGRectMake([UIScreen mainScreen].bounds.size.width - btnSize - 20, 150, btnSize, btnSize);
@@ -420,17 +420,13 @@ static void createFloatingWindow(void) {
     [btn setTitle:@"去广告" forState:UIControlStateNormal];
     btn.titleLabel.font = [UIFont boldSystemFontOfSize:14];
     btn.userInteractionEnabled = YES;
-    
-    // 点击
+
     [btn addAction:[UIAction actionWithHandler:^(__kindof UIAction * _) {
         TESTLOG(@"🔘 按钮被点击，开始扫描广告");
         scanForAdsInTopWindow();
     }] forControlEvents:UIControlEventTouchUpInside];
-    
-    // 创建手势处理器并强引用
+
     gestureHandler = [[_AdBlockGestureHandler alloc] init];
-    
-    // 拖动
     gestureHandler.panBlock = ^(UIPanGestureRecognizer *gesture) {
         static CGPoint start;
         if (gesture.state == UIGestureRecognizerStateBegan) {
@@ -443,8 +439,7 @@ static void createFloatingWindow(void) {
     };
     UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:gestureHandler action:@selector(handlePan:)];
     [btn addGestureRecognizer:pan];
-    
-    // 长按强制标记
+
     gestureHandler.longPressBlock = ^(UILongPressGestureRecognizer *gesture) {
         if (gesture.state == UIGestureRecognizerStateBegan) {
             TESTLOG(@"📌 长按按钮，强制标记顶层窗口");
@@ -453,13 +448,12 @@ static void createFloatingWindow(void) {
     };
     UILongPressGestureRecognizer *longPress = [[UILongPressGestureRecognizer alloc] initWithTarget:gestureHandler action:@selector(handleLongPress:)];
     longPress.minimumPressDuration = LONG_PRESS_DURATION;
-    longPress.allowableMovement = 10; // 允许轻微移动仍触发长按
+    longPress.allowableMovement = 10;
     [btn addGestureRecognizer:longPress];
-    
+
     [floatingWindow.rootViewController.view addSubview:btn];
     floatingWindow.actionButton = btn;
     floatingBtn = btn;
-    
     TESTLOG(@"🔴 悬浮窗已创建 (level: %.0f) + 长按强制标记", floatingWindow.windowLevel);
 }
 
@@ -478,15 +472,18 @@ static void updateFloatingLevel(void) {
     }
 #pragma clang diagnostic pop
     floatingWindow.windowLevel = maxLevel + 1;
-    [floatingWindow makeKeyAndVisible];
-    TESTLOG(@"🔝 悬浮窗 level 更新为: %.0f", floatingWindow.windowLevel);
+    // 如果标记弹窗正在显示，不抢占 key window
+    if (!markUIShowing) {
+        [floatingWindow makeKeyAndVisible];
+    }
+    TESTLOG(@"🔝 悬浮窗 level 更新为: %.0f (markUIShowing=%d)", floatingWindow.windowLevel, markUIShowing);
 }
 
-// ---------- UIWindow 监控 ----------
+// UIWindow 监控
 static void (*orig_makeKeyAndVisible)(id, SEL);
 static void swizzled_makeKeyAndVisible(UIWindow *self, SEL _cmd) {
     orig_makeKeyAndVisible(self, _cmd);
-    if (self == floatingWindow) return;
+    if (self == floatingWindow || self == markWindow) return;
     updateFloatingLevel();
     if (self.frame.size.width >= [UIScreen mainScreen].bounds.size.width * 0.8 &&
         self.frame.size.height >= [UIScreen mainScreen].bounds.size.height * 0.8 &&
@@ -502,7 +499,7 @@ static void swizzled_makeKeyAndVisible(UIWindow *self, SEL _cmd) {
     }
 }
 
-// ---------- Toast 提示 ----------
+// Toast 提示
 static void showLoadedToast() {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         UIWindow *toastWin = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
@@ -518,7 +515,6 @@ static void showLoadedToast() {
         toastWin.backgroundColor = [UIColor clearColor];
         toastWin.userInteractionEnabled = NO;
         toastWin.hidden = NO;
-        
         UILabel *label = [[UILabel alloc] init];
         label.text = @"✅ AdBlock 已加载";
         label.textColor = [UIColor whiteColor];
@@ -534,7 +530,6 @@ static void showLoadedToast() {
         label.frame = frame;
         label.center = CGPointMake(toastWin.bounds.size.width/2, toastWin.bounds.size.height - 100);
         [toastWin addSubview:label];
-        
         label.alpha = 0;
         [UIView animateWithDuration:0.3 animations:^{
             label.alpha = 1;
@@ -548,18 +543,16 @@ static void showLoadedToast() {
     });
 }
 
-// ========== 初始化 ==========
+// 初始化
 __attribute__((constructor))
 static void adblock_init() {
     TESTLOG(@"🚀 去广告插件初始化");
     applyKnownSDKHooks();
-    
     Method m = class_getInstanceMethod([UIWindow class], @selector(makeKeyAndVisible));
     if (m) {
         orig_makeKeyAndVisible = (void (*)(id, SEL))method_getImplementation(m);
         method_setImplementation(m, (IMP)swizzled_makeKeyAndVisible);
     }
-    
     [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidBecomeActiveNotification
                                                       object:nil queue:[NSOperationQueue mainQueue]
                                                   usingBlock:^(NSNotification * _) {
@@ -568,6 +561,5 @@ static void adblock_init() {
             scanForAdsInTopWindow();
         });
     }];
-    
     showLoadedToast();
 }
