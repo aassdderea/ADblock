@@ -1,5 +1,5 @@
 // ==========================================
-// Tweak.m - 通用去开屏广告插件（动态层级终极版）
+// Tweak.m - 通用去开屏广告插件（绝对可靠终结版）
 // 适用于 iOS 16.6 + TrollStore
 // ==========================================
 
@@ -10,7 +10,7 @@
 #define HEURISTIC_CHECK_DELAY 1.5
 #define LONG_PRESS_DURATION   1.0
 #define LEARN_TIMEOUT         10.0
-#define GUARD_INTERVAL        0.3
+#define GUARD_INTERVAL        0.1
 
 #define TESTLOG(fmt, ...) NSLog(@"[AD-BLOCKER] " fmt, ##__VA_ARGS__)
 
@@ -28,7 +28,6 @@ static BOOL tryAutoSkipWithRules(UIView *adView);
 static void showLoadedToast(void);
 static void createFloatingWindow(void);
 
-// 手势辅助类
 @interface _AdBlockGestureHandler : NSObject
 @property (nonatomic, copy) void (^panBlock)(UIPanGestureRecognizer *);
 @property (nonatomic, copy) void (^longPressBlock)(UILongPressGestureRecognizer *);
@@ -40,7 +39,6 @@ static void createFloatingWindow(void);
 - (void)handleLongPress:(UILongPressGestureRecognizer *)g { if(self.longPressBlock) self.longPressBlock(g); }
 @end
 
-// 触摸穿透窗口
 @interface _FloatingWindow : UIWindow
 @property (nonatomic, weak) UIButton *actionButton;
 @end
@@ -53,7 +51,6 @@ static void createFloatingWindow(void);
 - (BOOL)_canBecomeKeyWindow { return NO; }
 @end
 
-// 全局变量
 static _FloatingWindow *floatingWindow = nil;
 static UIButton *floatingBtn = nil;
 static _AdBlockGestureHandler *gestureHandler = nil;
@@ -62,7 +59,6 @@ static NSTimer *learnTimeout = nil;
 static BOOL learnRecorded = NO;
 static NSTimer *guardTimer = nil;
 
-// 方法替换
 static void replaceInstanceMethod(Class cls, SEL sel, id impBlock, IMP *origPtr) {
     Method m = class_getInstanceMethod(cls, sel);
     if(!m) return;
@@ -71,8 +67,7 @@ static void replaceInstanceMethod(Class cls, SEL sel, id impBlock, IMP *origPtr)
     else method_setImplementation(m, imp);
 }
 
-// 获取当前最高层级窗口（仅使用 UIWindowScene）
-static UIWindow * _Nullable topWindowFromScenes(void) {
+static UIWindow * topWindowFromScenes(void) {
     UIWindow *top = nil;
     CGFloat maxLevel = -1;
     for (UIWindowScene *sc in [UIApplication sharedApplication].connectedScenes) {
@@ -86,12 +81,10 @@ static UIWindow * _Nullable topWindowFromScenes(void) {
     return top;
 }
 
-// 触摸模拟（高仿真）
 static void simulateTapAtPoint(CGPoint screenPoint) {
     CGFloat jitterX = ((CGFloat)arc4random() / UINT32_MAX) * 4 - 2;
     CGFloat jitterY = ((CGFloat)arc4random() / UINT32_MAX) * 4 - 2;
     CGPoint point = CGPointMake(screenPoint.x + jitterX, screenPoint.y + jitterY);
-
     UIWindow *target = topWindowFromScenes();
     if (!target) return;
     CGPoint wp = [target convertPoint:point fromWindow:nil];
@@ -116,7 +109,6 @@ static CGPoint screenPointForView(UIView *v) {
     return CGPointMake(CGRectGetMidX(r), CGRectGetMidY(r));
 }
 
-// 已知 SDK 拦截
 static BOOL knownHooked = NO;
 static void applyKnownSDKHooks() {
     if(knownHooked) return; knownHooked=YES;
@@ -126,7 +118,6 @@ static void applyKnownSDKHooks() {
     c=NSClassFromString(@"BaiduMobAdSplash"); if(c) replaceInstanceMethod(c,@selector(showInWindow:),^(id s,UIWindow *w){ id d=[s valueForKey:@"delegate"]; if(d&&[d respondsToSelector:@selector(splashAdDidClose:)]) [d performSelector:@selector(splashAdDidClose:) withObject:s]; },NULL);
 }
 
-// 规则存储
 static NSString *rulesPath() { return [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject stringByAppendingPathComponent:@"com.adblocker.rules.plist"]; }
 static NSMutableArray *loadRules() { NSArray *a = [NSArray arrayWithContentsOfFile:rulesPath()]; return a ? [a mutableCopy] : [NSMutableArray array]; }
 static void saveRules(NSArray *r) { [r writeToFile:rulesPath() atomically:YES]; }
@@ -168,7 +159,6 @@ static UIView *findViewWithClass(UIView *root, NSString *className) {
     return nil;
 }
 
-// 学习模式
 static void startLearningMode() {
     if(learningMode) return; learningMode=YES; learnRecorded=NO;
     [floatingBtn setTitle:@"学习中" forState:UIControlStateNormal]; floatingBtn.backgroundColor=[UIColor blueColor];
@@ -180,9 +170,28 @@ static void stopLearningMode() {
     ensureFloatingOnTop();
 }
 
-// ========== 动态置顶核心 ==========
+// ========== 绝对可靠的悬浮窗置顶与恢复 ==========
 static void ensureFloatingOnTop(void) {
     if (!floatingWindow) return;
+    // 强制恢复显示状态
+    floatingWindow.hidden = NO;
+    floatingWindow.alpha = 1.0;
+    // 如果 windowScene 丢失，重新关联
+    if (!floatingWindow.windowScene) {
+        for (UIWindowScene *sc in [UIApplication sharedApplication].connectedScenes) {
+            if (sc.activationState == UISceneActivationStateForegroundActive) {
+                floatingWindow.windowScene = sc;
+                break;
+            }
+        }
+        if (!floatingWindow.windowScene) {
+            for (UIWindowScene *sc in [UIApplication sharedApplication].connectedScenes) {
+                floatingWindow.windowScene = sc;
+                break;
+            }
+        }
+    }
+    // 计算全局最高层级
     CGFloat maxLevel = -1;
     for (UIWindowScene *sc in [UIApplication sharedApplication].connectedScenes) {
         for (UIWindow *w in sc.windows) {
@@ -190,41 +199,28 @@ static void ensureFloatingOnTop(void) {
         }
     }
     floatingWindow.windowLevel = maxLevel + 1;
-    floatingWindow.hidden = NO;
-    TESTLOG(@"🔝 悬浮窗置顶: level=%.0f", floatingWindow.windowLevel);
+    TESTLOG(@"🔝 悬浮窗修复: level=%.0f hidden=%d alpha=%.1f", floatingWindow.windowLevel, floatingWindow.hidden, floatingWindow.alpha);
 }
 
 static void startGuardTimer() {
     [guardTimer invalidate];
     guardTimer = [NSTimer scheduledTimerWithTimeInterval:GUARD_INTERVAL repeats:YES block:^(NSTimer *timer) {
-        if (!floatingWindow) return;
-        CGFloat maxLevel = -1;
-        for (UIWindowScene *sc in [UIApplication sharedApplication].connectedScenes) {
-            for (UIWindow *w in sc.windows) {
-                if (w != floatingWindow && !w.hidden && w.windowLevel > maxLevel) maxLevel = w.windowLevel;
-            }
-        }
-        if (floatingWindow.windowLevel <= maxLevel || floatingWindow.hidden) {
-            TESTLOG(@"🔧 守护发现异常 (max=%.0f, floating=%.0f hidden=%d)，强制置顶", maxLevel, floatingWindow.windowLevel, floatingWindow.hidden);
-            ensureFloatingOnTop();
-        }
+        ensureFloatingOnTop();
     }];
 }
 
-// 悬浮窗创建
+// ---------- 悬浮窗创建 ----------
 static void createFloatingWindow() {
     if(floatingWindow) return;
     floatingWindow = [[_FloatingWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
     for (UIWindowScene *sc in [UIApplication sharedApplication].connectedScenes) {
         if (sc.activationState == UISceneActivationStateForegroundActive) {
-            floatingWindow.windowScene = sc;
-            break;
+            floatingWindow.windowScene = sc; break;
         }
     }
     if (!floatingWindow.windowScene) {
         for (UIWindowScene *sc in [UIApplication sharedApplication].connectedScenes) {
-            floatingWindow.windowScene = sc;
-            break;
+            floatingWindow.windowScene = sc; break;
         }
     }
     floatingWindow.backgroundColor=[UIColor clearColor]; floatingWindow.userInteractionEnabled=YES;
@@ -254,7 +250,6 @@ static void createFloatingWindow() {
     startGuardTimer();
 }
 
-// 扫描广告（仅用 scenes）
 static void scanForAdsInTopWindow() {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, HEURISTIC_CHECK_DELAY*NSEC_PER_SEC), dispatch_get_main_queue(), ^{
         UIWindow *top = topWindowFromScenes();
@@ -267,7 +262,7 @@ static void scanForAdsInTopWindow() {
     });
 }
 
-// sendEvent Hook (学习模式)
+// ========== Hook 区域 ==========
 static void (*orig_sendEvent)(id, SEL, UIEvent *);
 static void swizzled_sendEvent(UIApplication *self, SEL _cmd, UIEvent *event) {
     if(learningMode && !learnRecorded && event.type==UIEventTypeTouches) {
@@ -287,25 +282,35 @@ static void swizzled_sendEvent(UIApplication *self, SEL _cmd, UIEvent *event) {
     orig_sendEvent(self, _cmd, event);
 }
 
-// setWindowLevel Hook
 static void (*orig_setWindowLevel)(id, SEL, CGFloat);
 static void swizzled_setWindowLevel(UIWindow *self, SEL _cmd, CGFloat level) {
     orig_setWindowLevel(self, _cmd, level);
     if(!floatingWindow || self==floatingWindow) return;
-    if(level >= floatingWindow.windowLevel) ensureFloatingOnTop();
+    ensureFloatingOnTop();
 }
 
-// setHidden Hook
 static void (*orig_setHidden)(id, SEL, BOOL);
 static void swizzled_setHidden(UIWindow *self, SEL _cmd, BOOL hidden) {
     if(self==floatingWindow && hidden) return;
     orig_setHidden(self, _cmd, hidden);
 }
 
-// makeKeyAndVisible Hook
+static void (*orig_removeFromSuperview)(id, SEL);
+static void swizzled_removeFromSuperview(UIWindow *self, SEL _cmd) {
+    if(self==floatingWindow) return; // 禁止移除
+    orig_removeFromSuperview(self, _cmd);
+}
+
 static void (*orig_makeKeyAndVisible)(id, SEL);
 static void swizzled_makeKeyAndVisible(UIWindow *self, SEL _cmd) {
     orig_makeKeyAndVisible(self, _cmd);
+    if(self!=floatingWindow) ensureFloatingOnTop();
+}
+
+// 私有方法 Hook
+static void (*orig_makeKeyWindow)(id, SEL);
+static void swizzled_makeKeyWindow(UIWindow *self, SEL _cmd) {
+    orig_makeKeyWindow(self, _cmd);
     if(self!=floatingWindow) ensureFloatingOnTop();
 }
 
@@ -315,8 +320,7 @@ static void showLoadedToast() {
         UIWindow *w = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
         for (UIWindowScene *sc in [UIApplication sharedApplication].connectedScenes) {
             if (sc.activationState == UISceneActivationStateForegroundActive) {
-                w.windowScene = sc;
-                break;
+                w.windowScene = sc; break;
             }
         }
         w.windowLevel=UIWindowLevelAlert+999; w.backgroundColor=[UIColor clearColor]; w.userInteractionEnabled=NO; w.hidden=NO;
@@ -326,15 +330,21 @@ static void showLoadedToast() {
     });
 }
 
-// 初始化
 __attribute__((constructor))
 static void adblock_init() {
     applyKnownSDKHooks();
     Method m;
     m = class_getInstanceMethod([UIWindow class], @selector(setWindowLevel:)); orig_setWindowLevel=(void(*)(id,SEL,CGFloat))method_getImplementation(m); method_setImplementation(m,(IMP)swizzled_setWindowLevel);
     m = class_getInstanceMethod([UIWindow class], @selector(setHidden:)); orig_setHidden=(void(*)(id,SEL,BOOL))method_getImplementation(m); method_setImplementation(m,(IMP)swizzled_setHidden);
+    m = class_getInstanceMethod([UIWindow class], @selector(removeFromSuperview)); orig_removeFromSuperview=(void(*)(id,SEL))method_getImplementation(m); method_setImplementation(m,(IMP)swizzled_removeFromSuperview);
     m = class_getInstanceMethod([UIWindow class], @selector(makeKeyAndVisible)); orig_makeKeyAndVisible=(void(*)(id,SEL))method_getImplementation(m); method_setImplementation(m,(IMP)swizzled_makeKeyAndVisible);
     m = class_getInstanceMethod([UIApplication class], @selector(sendEvent:)); orig_sendEvent=(void(*)(id,SEL,UIEvent*))method_getImplementation(m); method_setImplementation(m,(IMP)swizzled_sendEvent);
+    SEL makeKeySel = NSSelectorFromString(@"_makeKeyWindow");
+    if ([UIWindow instancesRespondToSelector:makeKeySel]) {
+        m = class_getInstanceMethod([UIWindow class], makeKeySel);
+        orig_makeKeyWindow = (void(*)(id,SEL))method_getImplementation(m);
+        method_setImplementation(m, (IMP)swizzled_makeKeyWindow);
+    }
     [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidBecomeActiveNotification object:nil queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification *_){ dispatch_after(dispatch_time(DISPATCH_TIME_NOW,0.5*NSEC_PER_SEC), dispatch_get_main_queue(), ^{ createFloatingWindow(); scanForAdsInTopWindow(); }); }];
     showLoadedToast();
 }
