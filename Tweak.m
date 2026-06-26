@@ -71,16 +71,29 @@ static void replaceInstanceMethod(Class cls, SEL sel, id impBlock, IMP *origPtr)
     else method_setImplementation(m, imp);
 }
 
+// 获取当前最高层级窗口（仅使用 UIWindowScene）
+static UIWindow * _Nullable topWindowFromScenes(void) {
+    UIWindow *top = nil;
+    CGFloat maxLevel = -1;
+    for (UIWindowScene *sc in [UIApplication sharedApplication].connectedScenes) {
+        for (UIWindow *w in sc.windows) {
+            if (!w.hidden && w.alpha > 0.01 && w.windowLevel > maxLevel) {
+                maxLevel = w.windowLevel;
+                top = w;
+            }
+        }
+    }
+    return top;
+}
+
 // 触摸模拟（高仿真）
 static void simulateTapAtPoint(CGPoint screenPoint) {
     CGFloat jitterX = ((CGFloat)arc4random() / UINT32_MAX) * 4 - 2;
     CGFloat jitterY = ((CGFloat)arc4random() / UINT32_MAX) * 4 - 2;
     CGPoint point = CGPointMake(screenPoint.x + jitterX, screenPoint.y + jitterY);
 
-    UIWindow *target = nil; CGFloat maxL = -1;
-    if(@available(iOS 13.0,*)) for(UIWindowScene *sc in [UIApplication sharedApplication].connectedScenes) if(sc.activationState == UISceneActivationStateForegroundActive) for(UIWindow *w in sc.windows) if(!w.hidden && w.alpha>0.01 && w.windowLevel>maxL){ maxL=w.windowLevel; target=w; }
-    if(!target) for(UIWindow *w in [UIApplication sharedApplication].windows) if(!w.hidden&&w.alpha>0.01&&w.windowLevel>maxL){ maxL=w.windowLevel; target=w; }
-    if(!target) return;
+    UIWindow *target = topWindowFromScenes();
+    if (!target) return;
     CGPoint wp = [target convertPoint:point fromWindow:nil];
     UIView *hit = [target hitTest:wp withEvent:nil] ?: target;
     UITouch *touch = [[UITouch alloc] init];
@@ -202,7 +215,18 @@ static void startGuardTimer() {
 static void createFloatingWindow() {
     if(floatingWindow) return;
     floatingWindow = [[_FloatingWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
-    if(@available(iOS 13.0,*)){ for(UIWindowScene *sc in [UIApplication sharedApplication].connectedScenes) if(sc.activationState==UISceneActivationStateForegroundActive){ floatingWindow.windowScene=sc; break; } }
+    for (UIWindowScene *sc in [UIApplication sharedApplication].connectedScenes) {
+        if (sc.activationState == UISceneActivationStateForegroundActive) {
+            floatingWindow.windowScene = sc;
+            break;
+        }
+    }
+    if (!floatingWindow.windowScene) {
+        for (UIWindowScene *sc in [UIApplication sharedApplication].connectedScenes) {
+            floatingWindow.windowScene = sc;
+            break;
+        }
+    }
     floatingWindow.backgroundColor=[UIColor clearColor]; floatingWindow.userInteractionEnabled=YES;
     floatingWindow.rootViewController=[UIViewController new]; floatingWindow.rootViewController.view.backgroundColor=[UIColor clearColor];
     ensureFloatingOnTop();
@@ -230,17 +254,15 @@ static void createFloatingWindow() {
     startGuardTimer();
 }
 
-// 扫描广告
+// 扫描广告（仅用 scenes）
 static void scanForAdsInTopWindow() {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, HEURISTIC_CHECK_DELAY*NSEC_PER_SEC), dispatch_get_main_queue(), ^{
-        UIWindow *top=nil; CGFloat maxL=-1;
-        if(@available(iOS 13.0,*)) for(UIWindowScene *sc in [UIApplication sharedApplication].connectedScenes) if(sc.activationState==UISceneActivationStateForegroundActive) for(UIWindow *w in sc.windows) if(!w.hidden&&w.alpha>0.01&&w.windowLevel>maxL){ maxL=w.windowLevel; top=w; }
-        if(!top) for(UIWindow *w in [UIApplication sharedApplication].windows) if(!w.hidden&&w.alpha>0.01&&w.windowLevel>maxL){ maxL=w.windowLevel; top=w; }
-        if(!top) return;
+        UIWindow *top = topWindowFromScenes();
+        if (!top) return;
         UIView *rootView = top.rootViewController.view ?: top;
-        for(NSDictionary *rule in loadRules()) {
+        for (NSDictionary *rule in loadRules()) {
             UIView *adView = findViewWithClass(rootView, rule[@"adViewClass"]);
-            if(adView) tryAutoSkipWithRules(adView);
+            if (adView) tryAutoSkipWithRules(adView);
         }
     });
 }
@@ -291,7 +313,12 @@ static void swizzled_makeKeyAndVisible(UIWindow *self, SEL _cmd) {
 static void showLoadedToast() {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 1.0*NSEC_PER_SEC), dispatch_get_main_queue(), ^{
         UIWindow *w = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
-        if(@available(iOS 13.0,*)) for(UIWindowScene *sc in [UIApplication sharedApplication].connectedScenes) if(sc.activationState==UISceneActivationStateForegroundActive){ w.windowScene=sc; break; }
+        for (UIWindowScene *sc in [UIApplication sharedApplication].connectedScenes) {
+            if (sc.activationState == UISceneActivationStateForegroundActive) {
+                w.windowScene = sc;
+                break;
+            }
+        }
         w.windowLevel=UIWindowLevelAlert+999; w.backgroundColor=[UIColor clearColor]; w.userInteractionEnabled=NO; w.hidden=NO;
         UILabel *l=[UILabel new]; l.text=@"✅ AdBlock 已加载"; l.textColor=[UIColor whiteColor]; l.backgroundColor=[[UIColor blackColor] colorWithAlphaComponent:0.7]; l.textAlignment=NSTextAlignmentCenter; l.font=[UIFont systemFontOfSize:16]; l.layer.cornerRadius=10; l.layer.masksToBounds=YES;
         [l sizeToFit]; CGRect f=l.frame; f.size.width+=30; f.size.height+=16; l.frame=f; l.center=CGPointMake(w.bounds.size.width/2, w.bounds.size.height-100);
