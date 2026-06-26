@@ -14,9 +14,13 @@
 
 #define TESTLOG(fmt, ...) NSLog(@"[AD-BLOCKER] " fmt, ##__VA_ARGS__)
 
-// 手势辅助类
+// 手势辅助类（同时处理 pan 和 long press）
 @interface _AdBlockGestureHandler : NSObject
 @property (nonatomic, copy) void (^panBlock)(UIPanGestureRecognizer *);
+@property (nonatomic, copy) void (^longPressBlock)(UILongPressGestureRecognizer *);
+- (instancetype)initWithBlock:(void (^)(UIPanGestureRecognizer *))block;
+- (void)handlePan:(UIPanGestureRecognizer *)gesture;
+- (void)handleLongPress:(UILongPressGestureRecognizer *)gesture;
 @end
 @implementation _AdBlockGestureHandler
 - (instancetype)initWithBlock:(void (^)(UIPanGestureRecognizer *))block {
@@ -25,6 +29,9 @@
 }
 - (void)handlePan:(UIPanGestureRecognizer *)gesture {
     if (self.panBlock) self.panBlock(gesture);
+}
+- (void)handleLongPress:(UILongPressGestureRecognizer *)gesture {
+    if (self.longPressBlock) self.longPressBlock(gesture);
 }
 @end
 
@@ -330,11 +337,7 @@ static void scanForAdsInTopWindow() {
     });
 }
 
-// ========== 悬浮窗（穿透+防覆盖+长按强制标记） ==========
-static _FloatingWindow *floatingWindow = nil;
-static UIButton *floatingBtn = nil;
-
-// 强制标记当前最高窗口的顶层视图
+// ========== 强制标记当前最高窗口的顶层视图 ==========
 static void forceMarkTopView(void) {
     UIWindow *top = nil;
     CGFloat maxLvl = -1;
@@ -361,6 +364,10 @@ static void forceMarkTopView(void) {
     UIView *targetView = top.rootViewController.view ?: top;
     showMarkUI(targetView);
 }
+
+// ========== 悬浮窗（穿透+防覆盖+长按强制标记） ==========
+static _FloatingWindow *floatingWindow = nil;
+static UIButton *floatingBtn = nil;
 
 static void createFloatingWindow(void) {
     if (floatingWindow) return;
@@ -438,13 +445,14 @@ static void createFloatingWindow(void) {
     UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:handler action:@selector(handlePan:)];
     [btn addGestureRecognizer:pan];
     
-    // 长按手势：强制标记当前顶层窗口
-    UILongPressGestureRecognizer *longPress = [[UILongPressGestureRecognizer alloc] initWithTarget:nil action:^(UILongPressGestureRecognizer *gesture) {
+    // 长按手势：强制标记
+    handler.longPressBlock = ^(UILongPressGestureRecognizer *gesture) {
         if (gesture.state == UIGestureRecognizerStateBegan) {
             TESTLOG(@"📌 长按按钮，强制标记顶层窗口");
             forceMarkTopView();
         }
-    }];
+    };
+    UILongPressGestureRecognizer *longPress = [[UILongPressGestureRecognizer alloc] initWithTarget:handler action:@selector(handleLongPress:)];
     longPress.minimumPressDuration = LONG_PRESS_DURATION;
     [btn addGestureRecognizer:longPress];
     
