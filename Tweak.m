@@ -376,6 +376,7 @@ static void addFloatingButton() {
                     }
                 }
             }];
+         (void)timer;   // ← 就是这一行，消除 unused variable 警告
         }
     });
 }
