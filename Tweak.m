@@ -1,5 +1,5 @@
 // ==========================================
-// Tweak.m - 通用去开屏广告插件（修复盾牌不显示）
+// Tweak.m - 通用去开屏广告插件（最终修复版）
 // ==========================================
 
 #import <UIKit/UIKit.h>
@@ -12,7 +12,7 @@
 
 #define TESTLOG(fmt, ...) NSLog(@"[AD-BLOCKER] " fmt, ##__VA_ARGS__)
 
-// 辅助类：手势处理目标
+// 手势辅助类
 @interface _AdBlockGestureHandler : NSObject
 @property (nonatomic, copy) void (^panBlock)(UIPanGestureRecognizer *);
 @end
@@ -26,7 +26,7 @@
 }
 @end
 
-// ---------- 工具函数 ----------
+// ---------- 方法替换 ----------
 static void replaceInstanceMethod(Class cls, SEL sel, id newImpBlock, IMP *origPtr) {
     Method m = class_getInstanceMethod(cls, sel);
     if (!m) return;
@@ -35,6 +35,7 @@ static void replaceInstanceMethod(Class cls, SEL sel, id newImpBlock, IMP *origP
     else method_setImplementation(m, newImp);
 }
 
+// ---------- 触摸模拟 ----------
 static void showTapIndicatorAtPoint(CGPoint screenPoint) {
     CGFloat size = 40.0;
     UIWindow *indicatorWindow = [[UIWindow alloc] initWithFrame:CGRectMake(screenPoint.x - size/2, screenPoint.y - size/2, size, size)];
@@ -75,6 +76,9 @@ static void simulateTapAtPoint(CGPoint screenPoint) {
             }
         }
     }
+    // 兼容旧系统，但完全禁用弃用警告
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
     if (!targetWindow) {
         for (UIWindow *w in [UIApplication sharedApplication].windows) {
             if (!w.isHidden && w.alpha > 0.01 && w.windowLevel > maxLevel) {
@@ -83,6 +87,8 @@ static void simulateTapAtPoint(CGPoint screenPoint) {
             }
         }
     }
+#pragma clang diagnostic pop
+    
     if (!targetWindow) return;
     
     CGPoint windowPoint = [targetWindow convertPoint:screenPoint fromWindow:nil];
@@ -126,7 +132,7 @@ static CGPoint screenPointForView(UIView *view) {
     return CGPointMake(CGRectGetMidX(frameInScreen), CGRectGetMidY(frameInScreen));
 }
 
-// ---------- 已知 SDK Hook ----------
+// ---------- 已知 SDK 拦截 ----------
 static BOOL knownHookApplied = NO;
 static void applyKnownSDKHooks() {
     if (knownHookApplied) return;
@@ -268,12 +274,21 @@ static void scanForAdsInTopWindow() {
                 }
             }
         }
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
         if (!top) {
-            for (UIWindow *w in [UIApplication sharedApplication].windows)
-                if (!w.hidden && w.alpha>0.01 && w.windowLevel>maxLvl) { maxLvl = w.windowLevel; top = w; }
+            for (UIWindow *w in [UIApplication sharedApplication].windows) {
+                if (!w.hidden && w.alpha>0.01 && w.windowLevel>maxLvl) {
+                    maxLvl = w.windowLevel; top = w;
+                }
+            }
         }
+#pragma clang diagnostic pop
         if (!top) return;
-        for (UIView *sub in top.rootViewController.view ?: top.subviews) {
+        
+        // 修复：安全地获取顶层子视图数组
+        NSArray *subviews = top.rootViewController.view ? top.rootViewController.view.subviews : top.subviews;
+        for (UIView *sub in subviews) {
             if (isLikelyAdView(sub)) {
                 if (tryAutoSkipWithRules(sub)) continue;
                 showMarkUI(sub);
@@ -300,11 +315,10 @@ static void swizzled_makeKeyAndVisible(UIWindow *self, SEL _cmd) {
     }
 }
 
-// ========== 核心：显示悬浮按钮（保证窗口关联 Scene） ==========
+// ---------- 悬浮按钮 ----------
 static void addFloatingButton() {
     dispatch_async(dispatch_get_main_queue(), ^{
         UIWindow *btnWin = [[UIWindow alloc] initWithFrame:CGRectMake([UIScreen mainScreen].bounds.size.width-60, 100, 50, 50)];
-        // 关联到当前活跃的 windowScene
         if (@available(iOS 13.0, *)) {
             for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
                 if (scene.activationState == UISceneActivationStateForegroundActive) {
@@ -333,7 +347,7 @@ static void addFloatingButton() {
                 start = [gesture locationInView:btnWin];
             } else {
                 CGPoint curr = [gesture locationInView:nil];
-                btnWin.frame = (CGRect){curr.x - start.x, curr.y - start.y, btnWin.frame.size};
+                btnWin.frame = CGRectMake(curr.x - start.x, curr.y - start.y, btnWin.frame.size.width, btnWin.frame.size.height);
             }
         }];
         UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:handler action:@selector(handlePan:)];
@@ -341,36 +355,53 @@ static void addFloatingButton() {
     });
 }
 
-// ========== 启动确认弹窗（一次性） ==========
-static void showLoadedAlert() {
+// ---------- Toast 提示 ----------
+static void showLoadedToast() {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        UIWindow *alertWin = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
+        UIWindow *toastWin = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
         if (@available(iOS 13.0, *)) {
             for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
                 if (scene.activationState == UISceneActivationStateForegroundActive) {
-                    alertWin.windowScene = scene;
+                    toastWin.windowScene = scene;
                     break;
                 }
             }
         }
-        alertWin.windowLevel = UIWindowLevelAlert + 999;
-        alertWin.backgroundColor = [UIColor clearColor];
-        alertWin.hidden = NO;
-        UIViewController *vc = [UIViewController new];
-        vc.view.backgroundColor = [UIColor clearColor];
-        alertWin.rootViewController = vc;
+        toastWin.windowLevel = UIWindowLevelAlert + 999;
+        toastWin.backgroundColor = [UIColor clearColor];
+        toastWin.userInteractionEnabled = NO;
+        toastWin.hidden = NO;
         
-        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"✅ AdBlock"
-                                                                       message:@"插件已成功加载！\n盾牌按钮可拖动，点击手动扫描广告"
-                                                                preferredStyle:UIAlertControllerStyleAlert];
-        [alert addAction:[UIAlertAction actionWithTitle:@"知道了" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _) {
-            alertWin.hidden = YES;
-        }]];
-        [vc presentViewController:alert animated:YES completion:nil];
+        UILabel *label = [[UILabel alloc] init];
+        label.text = @"✅ AdBlock 已加载";
+        label.textColor = [UIColor whiteColor];
+        label.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.7];
+        label.textAlignment = NSTextAlignmentCenter;
+        label.font = [UIFont systemFontOfSize:16];
+        label.layer.cornerRadius = 10;
+        label.layer.masksToBounds = YES;
+        [label sizeToFit];
+        CGRect frame = label.frame;
+        frame.size.width += 30;
+        frame.size.height += 16;
+        label.frame = frame;
+        label.center = CGPointMake(toastWin.bounds.size.width/2, toastWin.bounds.size.height - 100);
+        [toastWin addSubview:label];
+        
+        label.alpha = 0;
+        [UIView animateWithDuration:0.3 animations:^{
+            label.alpha = 1;
+        } completion:^(BOOL finished) {
+            [UIView animateWithDuration:0.3 delay:1.5 options:UIViewAnimationOptionCurveEaseOut animations:^{
+                label.alpha = 0;
+            } completion:^(BOOL finished) {
+                toastWin.hidden = YES;
+            }];
+        }];
     });
 }
 
-// ========== 初始化入口 ==========
+// ========== 初始化 ==========
 __attribute__((constructor))
 static void adblock_init() {
     TESTLOG(@"🚀 去广告插件初始化");
@@ -388,7 +419,6 @@ static void adblock_init() {
         scanForAdsInTopWindow();
     }];
     
-    // 加载提示 + 盾牌按钮
-    showLoadedAlert();
+    showLoadedToast();
     addFloatingButton();
 }
