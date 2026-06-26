@@ -1,6 +1,6 @@
 // ==========================================
 // Tweak.m - 通用去开屏广告插件（根本修复版）
-// 适用于 iOS 16.6 + TrollStore，无需担心 UIWindowScene
+// 适用于 iOS 16.6 + TrollStore，红色按钮直接添加到最顶层窗口
 // ==========================================
 
 #import <UIKit/UIKit.h>
@@ -208,7 +208,7 @@ static void showMarkUI(UIView *adView) {
     if (markUIShowing) return;
     markUIShowing = YES;
     
-    // 获取最高层级窗口
+    // 获取最高层级窗口以关联 Scene
     UIWindow *topWin = nil;
     CGFloat maxLvl = -1;
     if (@available(iOS 13.0, *)) {
@@ -232,8 +232,10 @@ static void showMarkUI(UIView *adView) {
 #pragma clang diagnostic pop
     
     UIWindow *win = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
-    if (topWin && @available(iOS 13.0, *)) {
-        win.windowScene = topWin.windowScene;
+    if (topWin) {
+        if (@available(iOS 13.0, *)) {
+            win.windowScene = topWin.windowScene;
+        }
     }
     win.windowLevel = UIWindowLevelAlert + 1000;
     win.backgroundColor = [UIColor colorWithWhite:0 alpha:0.4];
@@ -338,7 +340,7 @@ static BOOL floatingButtonAdded = NO;
 static void addFloatingButtonToTopWindow() {
     if (floatingButtonAdded) return;
     
-    // 获取当前 windowLevel 最高的窗口（不论是哪个 Scene）
+    // 获取当前 windowLevel 最高的窗口
     UIWindow *topWindow = nil;
     CGFloat maxLevel = -1;
     if (@available(iOS 13.0, *)) {
@@ -364,7 +366,6 @@ static void addFloatingButtonToTopWindow() {
 #pragma clang diagnostic pop
     
     if (!topWindow) {
-        // 如果没有窗口，延迟重试
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             addFloatingButtonToTopWindow();
         });
@@ -374,46 +375,40 @@ static void addFloatingButtonToTopWindow() {
     
     floatingButtonAdded = YES;
     
-    // 创建按钮视图
-    UIView *buttonView = [[UIView alloc] initWithFrame:CGRectMake([UIScreen mainScreen].bounds.size.width - 70, 150, 60, 60)];
-    buttonView.backgroundColor = [UIColor redColor];
-    buttonView.layer.cornerRadius = 30;
-    buttonView.layer.borderWidth = 3.0;
-    buttonView.layer.borderColor = [UIColor whiteColor].CGColor;
-    buttonView.layer.shadowColor = [UIColor blackColor].CGColor;
-    buttonView.layer.shadowOffset = CGSizeMake(0, 4);
-    buttonView.layer.shadowOpacity = 0.8;
-    buttonView.layer.zPosition = CGFLOAT_MAX;  // 保证在最上面
-    buttonView.userInteractionEnabled = YES;
-    
-    UILabel *titleLabel = [[UILabel alloc] initWithFrame:buttonView.bounds];
-    titleLabel.text = @"去广告";
-    titleLabel.textAlignment = NSTextAlignmentCenter;
-    titleLabel.textColor = [UIColor whiteColor];
-    titleLabel.font = [UIFont boldSystemFontOfSize:14];
-    [buttonView addSubview:titleLabel];
+    // 创建红色按钮
+    UIButton *btn = [UIButton buttonWithType:UIButtonTypeCustom];
+    btn.frame = CGRectMake([UIScreen mainScreen].bounds.size.width - 70, 150, 60, 60);
+    btn.backgroundColor = [UIColor redColor];
+    btn.layer.cornerRadius = 30;
+    btn.layer.borderWidth = 3.0;
+    btn.layer.borderColor = [UIColor whiteColor].CGColor;
+    btn.layer.shadowColor = [UIColor blackColor].CGColor;
+    btn.layer.shadowOffset = CGSizeMake(0, 4);
+    btn.layer.shadowOpacity = 0.8;
+    [btn setTitle:@"去广告" forState:UIControlStateNormal];
+    btn.titleLabel.font = [UIFont boldSystemFontOfSize:14];
+    btn.layer.zPosition = CGFLOAT_MAX;
     
     // 点击事件
-    UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:nil action:^(UITapGestureRecognizer *gesture) {
+    [btn addAction:[UIAction actionWithHandler:^(__kindof UIAction * _) {
         scanForAdsInTopWindow();
-    }];
-    [buttonView addGestureRecognizer:tap];
+    }] forControlEvents:UIControlEventTouchUpInside];
     
     // 拖动支持
     _AdBlockGestureHandler *handler = [[_AdBlockGestureHandler alloc] initWithBlock:^(UIPanGestureRecognizer *gesture) {
         static CGPoint start;
         if (gesture.state == UIGestureRecognizerStateBegan) {
-            start = [gesture locationInView:buttonView];
+            start = [gesture locationInView:btn];
         } else {
             CGPoint curr = [gesture locationInView:topWindow];
-            buttonView.frame = CGRectMake(curr.x - start.x, curr.y - start.y,
-                                          buttonView.frame.size.width, buttonView.frame.size.height);
+            btn.frame = CGRectMake(curr.x - start.x, curr.y - start.y,
+                                   btn.frame.size.width, btn.frame.size.height);
         }
     }];
     UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:handler action:@selector(handlePan:)];
-    [buttonView addGestureRecognizer:pan];
+    [btn addGestureRecognizer:pan];
     
-    [topWindow addSubview:buttonView];
+    [topWindow addSubview:btn];
     TESTLOG(@"🔴 红色去广告按钮已添加到窗口 (level: %.0f)", topWindow.windowLevel);
 }
 
@@ -479,7 +474,6 @@ static void adblock_init() {
     [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidBecomeActiveNotification
                                                       object:nil queue:[NSOperationQueue mainQueue]
                                                   usingBlock:^(NSNotification * _) {
-        // 延迟 0.5 秒，确保界面构建完毕
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             addFloatingButtonToTopWindow();
             scanForAdsInTopWindow();
