@@ -1,5 +1,5 @@
 // ==========================================
-// Tweak.m - 通用去开屏广告插件（最终稳定版）
+// Tweak.m - 通用去开屏广告插件（最终底钩版）
 // 适用于 iOS 16.6 + TrollStore
 // ==========================================
 
@@ -47,7 +47,7 @@ static void createFloatingWindow(void);
 - (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
     if (self.actionButton && CGRectContainsPoint(self.actionButton.frame, point))
         return self.actionButton;
-    return nil; // 穿透
+    return nil;
 }
 - (BOOL)_canBecomeKeyWindow { return NO; }
 @end
@@ -67,7 +67,6 @@ static void replaceInstanceMethod(Class cls, SEL sel, id impBlock, IMP *origPtr)
     else method_setImplementation(m, imp);
 }
 
-// 从触摸视图向上查找按钮
 static UIButton *findButtonFromView(UIView *view) {
     while (view) {
         if ([view isKindOfClass:[UIButton class]]) return (UIButton *)view;
@@ -76,7 +75,6 @@ static UIButton *findButtonFromView(UIView *view) {
     return nil;
 }
 
-// 获取除悬浮窗外最高层级窗口
 static UIWindow * topWindowExcludingFloating(void) {
     UIWindow *top = nil;
     CGFloat maxLevel = -1;
@@ -170,11 +168,9 @@ static UIView *findViewWithClass(UIView *root, NSString *className) {
     return nil;
 }
 
-// ========== 学习模式：禁用悬浮窗交互，确保触摸直达广告 ==========
 static void startLearningMode() {
     if(learningMode) return; learningMode=YES; learnRecorded=NO;
     [floatingBtn setTitle:@"学习中" forState:UIControlStateNormal]; floatingBtn.backgroundColor=[UIColor blueColor];
-    // 关键：让悬浮窗完全不参与触摸事件分发
     floatingWindow.userInteractionEnabled = NO;
     [learnTimeout invalidate];
     learnTimeout = [NSTimer scheduledTimerWithTimeInterval:LEARN_TIMEOUT repeats:NO block:^(NSTimer *_){ stopLearningMode(); }];
@@ -185,25 +181,22 @@ static void stopLearningMode() {
     if(!learningMode) return; learningMode=NO;
     [learnTimeout invalidate]; learnTimeout=nil;
     [floatingBtn setTitle:@"去广告" forState:UIControlStateNormal]; floatingBtn.backgroundColor=[UIColor redColor];
-    // 恢复交互和层级
     floatingWindow.userInteractionEnabled = YES;
     ensureFloatingOnTop();
     TESTLOG(@"📖 学习模式已退出");
 }
 
-// ========== 核心：限制其他窗口层级 + 悬浮窗置顶 ==========
 static void ensureFloatingOnTop(void) {
     if (!floatingWindow) return;
     floatingWindow.windowLevel = MAX_OTHER_WINDOW_LEVEL + 1;
     floatingWindow.hidden = NO;
     floatingWindow.alpha = 1.0;
-    floatingWindow.userInteractionEnabled = !learningMode; // 保持交互状态与学习模式一致
+    floatingWindow.userInteractionEnabled = !learningMode;
     if (floatingWindow.isKeyWindow) {
         [floatingWindow resignKeyWindow];
     }
 }
 
-// ---------- 悬浮窗创建 ----------
 static void createFloatingWindow() {
     if(floatingWindow) return;
     floatingWindow = [[_FloatingWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
@@ -264,34 +257,36 @@ static void scanForAdsInTopWindow() {
     });
 }
 
-// ========== Hook sendEvent: 学习模式捕获 ==========
-static void (*orig_sendEvent)(id, SEL, UIEvent *);
-static void swizzled_sendEvent(UIApplication *self, SEL _cmd, UIEvent *event) {
-    if(learningMode && !learnRecorded && event.type==UIEventTypeTouches) {
-        for(UITouch *t in [event allTouches]) {
-            if(t.phase==UITouchPhaseEnded && t.tapCount==1) {
-                // 向上查找按钮
-                UIButton *btn = findButtonFromView(t.view);
-                if(btn) {
-                    NSString *title = btn.titleLabel.text?:btn.accessibilityLabel?:@"";
-                    if([title containsString:@"跳过"]||[title containsString:@"Skip"]||[title containsString:@"关闭"]) {
-                        learnRecorded=YES;
+// ========== 底层钩子：UIWindow 的 _sendTouchesForEvent: ==========
+static void (*orig_UIWindow_sendTouchesForEvent)(id, SEL, NSSet *, UIEvent *);
+static void swizzled_UIWindow_sendTouchesForEvent(UIWindow *self, SEL _cmd, NSSet *touches, UIEvent *event) {
+    // 先调用原始实现，保证 App 正常响应
+    if (orig_UIWindow_sendTouchesForEvent) {
+        orig_UIWindow_sendTouchesForEvent(self, _cmd, touches, event);
+    }
+
+    // 学习模式下捕获跳过按钮点击
+    if (learningMode && !learnRecorded) {
+        for (UITouch *touch in touches) {
+            if (touch.phase == UITouchPhaseEnded && touch.tapCount == 1) {
+                UIButton *btn = findButtonFromView(touch.view);
+                if (btn) {
+                    NSString *title = btn.titleLabel.text ?: btn.accessibilityLabel ?: @"";
+                    if ([title containsString:@"跳过"] || [title containsString:@"Skip"] || [title containsString:@"关闭"]) {
+                        learnRecorded = YES;
                         UIView *container = findFullScreenContainer(btn);
                         NSString *adClass = container ? NSStringFromClass([container class]) : @"UnknownAdView";
                         addRule(adClass, NSStringFromClass([btn class]), title, btn.accessibilityLabel);
                         stopLearningMode();
                         showRuleSavedToast();
-                        orig_sendEvent(self, _cmd, event);
                         return;
                     }
                 }
             }
         }
     }
-    orig_sendEvent(self, _cmd, event);
 }
 
-// ========== 主动限制其他窗口层级 ==========
 static void (*orig_setWindowLevel)(id, SEL, CGFloat);
 static void swizzled_setWindowLevel(UIWindow *self, SEL _cmd, CGFloat level) {
     if (self != floatingWindow && level > MAX_OTHER_WINDOW_LEVEL) {
@@ -327,7 +322,7 @@ static void swizzled_makeKeyWindow(UIWindow *self, SEL _cmd) {
     if(self != floatingWindow && !learningMode) ensureFloatingOnTop();
 }
 
-// ========== Toast 提示 ==========
+// Toast
 static void showLoadedToast() {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 1.0*NSEC_PER_SEC), dispatch_get_main_queue(), ^{
         UIWindow *w = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
@@ -361,12 +356,47 @@ static void showRuleSavedToast() {
 __attribute__((constructor))
 static void adblock_init() {
     applyKnownSDKHooks();
+
+    // Hook UIWindow 的 _sendTouchesForEvent:
+    SEL sendTouchesSel = NSSelectorFromString(@"_sendTouchesForEvent:");
+    Method sendTouchesMethod = class_getInstanceMethod([UIWindow class], sendTouchesSel);
+    if (sendTouchesMethod) {
+        IMP newImp = imp_implementationWithBlock(^(id self, NSSet *touches, UIEvent *event) {
+            // 调用原始实现
+            if (orig_UIWindow_sendTouchesForEvent) {
+                orig_UIWindow_sendTouchesForEvent(self, sendTouchesSel, touches, event);
+            }
+            // 学习模式检测
+            if (learningMode && !learnRecorded) {
+                for (UITouch *touch in touches) {
+                    if (touch.phase == UITouchPhaseEnded && touch.tapCount == 1) {
+                        UIButton *btn = findButtonFromView(touch.view);
+                        if (btn) {
+                            NSString *title = btn.titleLabel.text ?: btn.accessibilityLabel ?: @"";
+                            if ([title containsString:@"跳过"] || [title containsString:@"Skip"] || [title containsString:@"关闭"]) {
+                                learnRecorded = YES;
+                                UIView *container = findFullScreenContainer(btn);
+                                NSString *adClass = container ? NSStringFromClass([container class]) : @"UnknownAdView";
+                                addRule(adClass, NSStringFromClass([btn class]), title, btn.accessibilityLabel);
+                                stopLearningMode();
+                                showRuleSavedToast();
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        orig_UIWindow_sendTouchesForEvent = (void(*)(id,SEL,NSSet*,UIEvent*))method_setImplementation(sendTouchesMethod, newImp);
+    } else {
+        TESTLOG(@"❌ 无法获取 _sendTouchesForEvent: 方法");
+    }
+
     Method m;
     m = class_getInstanceMethod([UIWindow class], @selector(setWindowLevel:)); orig_setWindowLevel=(void(*)(id,SEL,CGFloat))method_getImplementation(m); method_setImplementation(m,(IMP)swizzled_setWindowLevel);
     m = class_getInstanceMethod([UIWindow class], @selector(setHidden:)); orig_setHidden=(void(*)(id,SEL,BOOL))method_getImplementation(m); method_setImplementation(m,(IMP)swizzled_setHidden);
     m = class_getInstanceMethod([UIWindow class], @selector(removeFromSuperview)); orig_removeFromSuperview=(void(*)(id,SEL))method_getImplementation(m); method_setImplementation(m,(IMP)swizzled_removeFromSuperview);
     m = class_getInstanceMethod([UIWindow class], @selector(makeKeyAndVisible)); orig_makeKeyAndVisible=(void(*)(id,SEL))method_getImplementation(m); method_setImplementation(m,(IMP)swizzled_makeKeyAndVisible);
-    m = class_getInstanceMethod([UIApplication class], @selector(sendEvent:)); orig_sendEvent=(void(*)(id,SEL,UIEvent*))method_getImplementation(m); method_setImplementation(m,(IMP)swizzled_sendEvent);
     SEL makeKeySel = NSSelectorFromString(@"_makeKeyWindow");
     if ([UIWindow instancesRespondToSelector:makeKeySel]) {
         m = class_getInstanceMethod([UIWindow class], makeKeySel);
