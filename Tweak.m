@@ -1,5 +1,6 @@
 // ==========================================
-// Tweak.m - 终极调试暴力置顶版（请提供日志）
+// Tweak.m - 通用去开屏广告插件（KeyWindow抢夺终结版）
+// 适用于 iOS 16.6 + TrollStore
 // ==========================================
 
 #import <UIKit/UIKit.h>
@@ -13,6 +14,7 @@
 
 #define TESTLOG(fmt, ...) NSLog(@"[AD-BLOCKER] " fmt, ##__VA_ARGS__)
 
+// 前向声明
 @class _FloatingWindow;
 static void startLearningMode(void);
 static void stopLearningMode(void);
@@ -37,6 +39,7 @@ static void createFloatingWindow(void);
 - (void)handleLongPress:(UILongPressGestureRecognizer *)g { if(self.longPressBlock) self.longPressBlock(g); }
 @end
 
+// 允许成为 key window 的悬浮窗
 @interface _FloatingWindow : UIWindow
 @property (nonatomic, weak) UIButton *actionButton;
 @end
@@ -44,9 +47,10 @@ static void createFloatingWindow(void);
 - (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
     if (self.actionButton && CGRectContainsPoint(self.actionButton.frame, point))
         return self.actionButton;
-    return nil;
+    return nil; // 穿透
 }
-- (BOOL)_canBecomeKeyWindow { return NO; }
+// 关键：允许成为 key window
+- (BOOL)_canBecomeKeyWindow { return YES; }
 @end
 
 static _FloatingWindow *floatingWindow = nil;
@@ -168,37 +172,18 @@ static void stopLearningMode() {
     ensureFloatingOnTop();
 }
 
-// ========== 核心：暴力置顶 + 全局窗口打印 ==========
+// ========== 核心：强夺 key window ==========
 static void ensureFloatingOnTop(void) {
     if (!floatingWindow) return;
-    // 1. 强制恢复显示状态
     floatingWindow.hidden = NO;
     floatingWindow.alpha = 1.0;
-    if (!floatingWindow.windowScene) {
-        for (UIWindowScene *sc in [UIApplication sharedApplication].connectedScenes) {
-            if (sc.activationState == UISceneActivationStateForegroundActive) {
-                floatingWindow.windowScene = sc; break;
-            }
-        }
-        if (!floatingWindow.windowScene) {
-            for (UIWindowScene *sc in [UIApplication sharedApplication].connectedScenes) {
-                floatingWindow.windowScene = sc; break;
-            }
-        }
+    floatingWindow.userInteractionEnabled = YES;
+    floatingWindow.windowLevel = CGFLOAT_MAX - 1; // 依然极高
+    // 强制成为 key window
+    if (!floatingWindow.isKeyWindow) {
+        [floatingWindow makeKeyAndVisible];
     }
-    // 2. 暴力设置层级为天文数字
-    floatingWindow.windowLevel = CGFLOAT_MAX - 1;
-    
-    // 3. 打印所有窗口信息（用于调试，找到真正的广告窗口层级）
-    NSMutableString *dbg = [NSMutableString stringWithString:@"=== 当前所有窗口 ===\n"];
-    for (UIWindowScene *sc in [UIApplication sharedApplication].connectedScenes) {
-        for (UIWindow *w in sc.windows) {
-            [dbg appendFormat:@"  %@ (ptr=%p): level=%.0f hidden=%d alpha=%.2f key=%d frame=%@\n",
-             NSStringFromClass([w class]), w, w.windowLevel, w.hidden, w.alpha, w.isKeyWindow, NSStringFromCGRect(w.frame)];
-        }
-    }
-    [dbg appendString:@"=======================\n"];
-    TESTLOG(@"%@", dbg);
+    TESTLOG(@"🔝 悬浮窗置顶: level=%.0f key=%d", floatingWindow.windowLevel, floatingWindow.isKeyWindow);
 }
 
 static void startGuardTimer() {
@@ -285,6 +270,7 @@ static void (*orig_setWindowLevel)(id, SEL, CGFloat);
 static void swizzled_setWindowLevel(UIWindow *self, SEL _cmd, CGFloat level) {
     orig_setWindowLevel(self, _cmd, level);
     if(!floatingWindow || self==floatingWindow) return;
+    // 任何窗口改变层级，立即抢夺 key window
     ensureFloatingOnTop();
 }
 
@@ -303,13 +289,18 @@ static void swizzled_removeFromSuperview(UIWindow *self, SEL _cmd) {
 static void (*orig_makeKeyAndVisible)(id, SEL);
 static void swizzled_makeKeyAndVisible(UIWindow *self, SEL _cmd) {
     orig_makeKeyAndVisible(self, _cmd);
-    if(self!=floatingWindow) ensureFloatingOnTop();
+    // 任何窗口成为 key window，我们立即夺回
+    if(self != floatingWindow) {
+        ensureFloatingOnTop();
+    }
 }
 
 static void (*orig_makeKeyWindow)(id, SEL);
 static void swizzled_makeKeyWindow(UIWindow *self, SEL _cmd) {
     orig_makeKeyWindow(self, _cmd);
-    if(self!=floatingWindow) ensureFloatingOnTop();
+    if(self != floatingWindow) {
+        ensureFloatingOnTop();
+    }
 }
 
 // Toast
