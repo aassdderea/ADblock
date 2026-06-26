@@ -1,5 +1,5 @@
 // ==========================================
-// Tweak.m - 通用去开屏广告插件（终极修复版）
+// Tweak.m - 通用去开屏广告插件（层级限制终极版）
 // 适用于 iOS 16.6 + TrollStore
 // ==========================================
 
@@ -10,10 +10,11 @@
 #define HEURISTIC_CHECK_DELAY 1.5
 #define LONG_PRESS_DURATION   1.0
 #define LEARN_TIMEOUT         10.0
-#define GUARD_INTERVAL        0.1
+#define MAX_OTHER_WINDOW_LEVEL 100000  // 其他窗口允许的最高层级
 
 #define TESTLOG(fmt, ...) NSLog(@"[AD-BLOCKER] " fmt, ##__VA_ARGS__)
 
+// 前向声明
 @class _FloatingWindow;
 static void startLearningMode(void);
 static void stopLearningMode(void);
@@ -47,7 +48,7 @@ static void createFloatingWindow(void);
         return self.actionButton;
     return nil;
 }
-- (BOOL)_canBecomeKeyWindow { return YES; }
+- (BOOL)_canBecomeKeyWindow { return NO; }
 @end
 
 static _FloatingWindow *floatingWindow = nil;
@@ -56,7 +57,6 @@ static _AdBlockGestureHandler *gestureHandler = nil;
 static BOOL learningMode = NO;
 static NSTimer *learnTimeout = nil;
 static BOOL learnRecorded = NO;
-static NSTimer *guardTimer = nil;
 
 static void replaceInstanceMethod(Class cls, SEL sel, id impBlock, IMP *origPtr) {
     Method m = class_getInstanceMethod(cls, sel);
@@ -66,12 +66,13 @@ static void replaceInstanceMethod(Class cls, SEL sel, id impBlock, IMP *origPtr)
     else method_setImplementation(m, imp);
 }
 
-static UIWindow * topWindowFromScenes(void) {
+// 获取除悬浮窗外最高层级窗口
+static UIWindow * topWindowExcludingFloating(void) {
     UIWindow *top = nil;
     CGFloat maxLevel = -1;
     for (UIWindowScene *sc in [UIApplication sharedApplication].connectedScenes) {
         for (UIWindow *w in sc.windows) {
-            if (!w.hidden && w.alpha > 0.01 && w.windowLevel > maxLevel) {
+            if (w != floatingWindow && !w.hidden && w.alpha > 0.01 && w.windowLevel > maxLevel) {
                 maxLevel = w.windowLevel;
                 top = w;
             }
@@ -84,7 +85,7 @@ static void simulateTapAtPoint(CGPoint screenPoint) {
     CGFloat jitterX = ((CGFloat)arc4random() / UINT32_MAX) * 4 - 2;
     CGFloat jitterY = ((CGFloat)arc4random() / UINT32_MAX) * 4 - 2;
     CGPoint point = CGPointMake(screenPoint.x + jitterX, screenPoint.y + jitterY);
-    UIWindow *target = topWindowFromScenes();
+    UIWindow *target = topWindowExcludingFloating();
     if (!target) return;
     CGPoint wp = [target convertPoint:point fromWindow:nil];
     UIView *hit = [target hitTest:wp withEvent:nil] ?: target;
@@ -172,70 +173,17 @@ static void stopLearningMode() {
     TESTLOG(@"📖 学习模式已退出");
 }
 
-// ========== 核心：强夺 key window + 恢复 scene 和 frame ==========
+// ========== 核心：限制其他窗口层级 + 悬浮窗置顶 ==========
 static void ensureFloatingOnTop(void) {
     if (!floatingWindow) return;
-
-    // 1. 确保 windowScene 有效
-    if (!floatingWindow.windowScene) {
-        UIWindowScene *activeScene = nil;
-        for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
-            if (scene.activationState == UISceneActivationStateForegroundActive) {
-                activeScene = scene;
-                break;
-            }
-        }
-        if (!activeScene) {
-            for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
-                if ([scene isKindOfClass:[UIWindowScene class]]) {
-                    activeScene = scene;
-                    break;
-                }
-            }
-        }
-        floatingWindow.windowScene = activeScene;
-    }
-
-    // 2. 确保 frame 不被改小
-    CGRect screenBounds = [UIScreen mainScreen].bounds;
-    if (!CGRectEqualToRect(floatingWindow.frame, screenBounds)) {
-        floatingWindow.frame = screenBounds;
-    }
-
-    // 3. 强制可见
+    floatingWindow.windowLevel = MAX_OTHER_WINDOW_LEVEL + 1;
     floatingWindow.hidden = NO;
     floatingWindow.alpha = 1.0;
     floatingWindow.userInteractionEnabled = YES;
-
-    // 4. 计算最高窗口层级（排除自身），并设置悬浮窗为其 +1
-    CGFloat maxLevel = -1;
-    for (UIWindowScene *sc in [UIApplication sharedApplication].connectedScenes) {
-        for (UIWindow *w in sc.windows) {
-            if (w != floatingWindow && !w.hidden && w.windowLevel > maxLevel) {
-                maxLevel = w.windowLevel;
-            }
-        }
+    // 确保悬浮窗不成为 key window
+    if (floatingWindow.isKeyWindow) {
+        [floatingWindow resignKeyWindow];
     }
-    floatingWindow.windowLevel = maxLevel + 1;
-
-    // 5. 确保渲染在最前
-    floatingWindow.layer.zPosition = CGFLOAT_MAX;
-
-    // 6. 确保为 key window
-    if (!floatingWindow.isKeyWindow) {
-        [floatingWindow makeKeyAndVisible];
-    }
-
-    // 调试日志
-    TESTLOG(@"🔝 悬浮窗置顶: level=%.0f key=%d scene=%@ frame=%@",
-            floatingWindow.windowLevel, floatingWindow.isKeyWindow, floatingWindow.windowScene, NSStringFromCGRect(floatingWindow.frame));
-}
-
-static void startGuardTimer() {
-    [guardTimer invalidate];
-    guardTimer = [NSTimer scheduledTimerWithTimeInterval:GUARD_INTERVAL repeats:YES block:^(NSTimer *timer) {
-        ensureFloatingOnTop();
-    }];
 }
 
 // ---------- 悬浮窗创建 ----------
@@ -252,9 +200,11 @@ static void createFloatingWindow() {
             floatingWindow.windowScene = sc; break;
         }
     }
-    floatingWindow.backgroundColor=[UIColor clearColor]; floatingWindow.userInteractionEnabled=YES;
-    floatingWindow.rootViewController=[UIViewController new]; floatingWindow.rootViewController.view.backgroundColor=[UIColor clearColor];
+    floatingWindow.backgroundColor = [UIColor clearColor];
+    floatingWindow.rootViewController = [UIViewController new];
+    floatingWindow.rootViewController.view.backgroundColor = [UIColor clearColor];
     ensureFloatingOnTop();
+    floatingWindow.hidden = NO;
 
     UIButton *btn = [UIButton buttonWithType:UIButtonTypeCustom]; CGFloat s=60;
     btn.frame = CGRectMake([UIScreen mainScreen].bounds.size.width-s-20, 150, s, s);
@@ -275,14 +225,15 @@ static void createFloatingWindow() {
     lp.minimumPressDuration = LONG_PRESS_DURATION; lp.allowableMovement=10;
     [btn addGestureRecognizer:lp];
 
-    [floatingWindow.rootViewController.view addSubview:btn]; floatingWindow.actionButton=btn; floatingBtn=btn;
-    startGuardTimer();
-    TESTLOG(@"🔴 悬浮窗创建完成");
+    [floatingWindow.rootViewController.view addSubview:btn];
+    floatingWindow.actionButton = btn;
+    floatingBtn = btn;
+    TESTLOG(@"🔴 悬浮窗创建完成 (level: %.0f)", floatingWindow.windowLevel);
 }
 
 static void scanForAdsInTopWindow() {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, HEURISTIC_CHECK_DELAY*NSEC_PER_SEC), dispatch_get_main_queue(), ^{
-        UIWindow *top = topWindowFromScenes();
+        UIWindow *top = topWindowExcludingFloating();
         if (!top) return;
         UIView *rootView = top.rootViewController.view ?: top;
         for (NSDictionary *rule in loadRules()) {
@@ -296,7 +247,7 @@ static void scanForAdsInTopWindow() {
     });
 }
 
-// ========== Hook sendEvent: 学习模式（排除悬浮窗干扰） ==========
+// ========== Hook 区域 ==========
 static void (*orig_sendEvent)(id, SEL, UIEvent *);
 static void swizzled_sendEvent(UIApplication *self, SEL _cmd, UIEvent *event) {
     if(learningMode && !learnRecorded && event.type==UIEventTypeTouches) {
@@ -305,18 +256,8 @@ static void swizzled_sendEvent(UIApplication *self, SEL _cmd, UIEvent *event) {
                 UIButton *btn = (UIButton *)t.view;
                 NSString *title = btn.titleLabel.text?:btn.accessibilityLabel?:@"";
                 if([title containsString:@"跳过"]||[title containsString:@"Skip"]||[title containsString:@"关闭"]) {
-                    UIWindow *topWin = nil;
-                    CGFloat maxLevel = -1;
-                    for (UIWindowScene *sc in [UIApplication sharedApplication].connectedScenes) {
-                        for (UIWindow *w in sc.windows) {
-                            if (w != floatingWindow && !w.hidden && w.windowLevel > maxLevel) {
-                                maxLevel = w.windowLevel;
-                                topWin = w;
-                            }
-                        }
-                    }
+                    UIWindow *topWin = topWindowExcludingFloating();
                     if (t.window != topWin) break;
-
                     learnRecorded=YES;
                     UIView *container = findFullScreenContainer(btn);
                     NSString *adClass = container ? NSStringFromClass([container class]) : @"UnknownAdView";
@@ -331,11 +272,16 @@ static void swizzled_sendEvent(UIApplication *self, SEL _cmd, UIEvent *event) {
     orig_sendEvent(self, _cmd, event);
 }
 
-// ========== 其他 Hook ==========
+// 主动限制其他窗口的最高层级
 static void (*orig_setWindowLevel)(id, SEL, CGFloat);
 static void swizzled_setWindowLevel(UIWindow *self, SEL _cmd, CGFloat level) {
+    if (self != floatingWindow && level > MAX_OTHER_WINDOW_LEVEL) {
+        level = MAX_OTHER_WINDOW_LEVEL;  // 强制压低
+        TESTLOG(@"🔻 窗口 %@ 试图设置层级 %.0f，已限制为 %d", NSStringFromClass([self class]), level, MAX_OTHER_WINDOW_LEVEL);
+    }
     orig_setWindowLevel(self, _cmd, level);
-    if(!floatingWindow || self==floatingWindow) return;
+    if (self == floatingWindow) return;
+    // 任何窗口层级变化后，确保悬浮窗是最高的
     ensureFloatingOnTop();
 }
 
@@ -354,17 +300,13 @@ static void swizzled_removeFromSuperview(UIWindow *self, SEL _cmd) {
 static void (*orig_makeKeyAndVisible)(id, SEL);
 static void swizzled_makeKeyAndVisible(UIWindow *self, SEL _cmd) {
     orig_makeKeyAndVisible(self, _cmd);
-    if(self != floatingWindow) {
-        ensureFloatingOnTop();
-    }
+    if(self != floatingWindow) ensureFloatingOnTop();
 }
 
 static void (*orig_makeKeyWindow)(id, SEL);
 static void swizzled_makeKeyWindow(UIWindow *self, SEL _cmd) {
     orig_makeKeyWindow(self, _cmd);
-    if(self != floatingWindow) {
-        ensureFloatingOnTop();
-    }
+    if(self != floatingWindow) ensureFloatingOnTop();
 }
 
 // Toast
