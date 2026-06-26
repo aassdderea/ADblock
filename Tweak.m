@@ -26,6 +26,7 @@ static UIView *findViewWithClass(UIView *root, NSString *className);
 static void addRule(NSString *adClass, NSString *btnClass, NSString *titleKeyword, NSString *accLabel);
 static BOOL tryAutoSkipWithRules(UIView *adView);
 static void showLoadedToast(void);
+static void showRuleSavedToast(void);
 static void createFloatingWindow(void);
 
 @interface _AdBlockGestureHandler : NSObject
@@ -164,11 +165,10 @@ static UIView *findViewWithClass(UIView *root, NSString *className) {
 static void startLearningMode() {
     if(learningMode) return; learningMode=YES; learnRecorded=NO;
     [floatingBtn setTitle:@"学习中" forState:UIControlStateNormal]; floatingBtn.backgroundColor=[UIColor blueColor];
-    // 将悬浮窗层级降到上限以下，让广告窗口处于比它高的位置（但仍被限制在 MAX_OTHER_WINDOW_LEVEL）
     floatingWindow.windowLevel = MAX_OTHER_WINDOW_LEVEL - 1;
     [learnTimeout invalidate];
     learnTimeout = [NSTimer scheduledTimerWithTimeInterval:LEARN_TIMEOUT repeats:NO block:^(NSTimer *_){ stopLearningMode(); }];
-    TESTLOG(@"📖 学习模式启动，请点击广告的跳过按钮");
+    TESTLOG(@"📖 学习模式启动");
 }
 
 static void stopLearningMode() {
@@ -182,7 +182,7 @@ static void stopLearningMode() {
 // ========== 核心：限制其他窗口层级 + 悬浮窗置顶 ==========
 static void ensureFloatingOnTop(void) {
     if (!floatingWindow) return;
-    if (!learningMode) { // 学习模式中不调整层级
+    if (!learningMode) {
         floatingWindow.windowLevel = MAX_OTHER_WINDOW_LEVEL + 1;
     }
     floatingWindow.hidden = NO;
@@ -254,7 +254,7 @@ static void scanForAdsInTopWindow() {
     });
 }
 
-// ========== Hook sendEvent: 学习模式不再需要窗口限制判断 ==========
+// ========== Hook sendEvent: 学习模式捕获 ==========
 static void (*orig_sendEvent)(id, SEL, UIEvent *);
 static void swizzled_sendEvent(UIApplication *self, SEL _cmd, UIEvent *event) {
     if(learningMode && !learnRecorded && event.type==UIEventTypeTouches) {
@@ -268,6 +268,7 @@ static void swizzled_sendEvent(UIApplication *self, SEL _cmd, UIEvent *event) {
                     NSString *adClass = container ? NSStringFromClass([container class]) : @"UnknownAdView";
                     addRule(adClass, NSStringFromClass([btn class]), title, btn.accessibilityLabel);
                     stopLearningMode();
+                    showRuleSavedToast(); // 显示提示
                     orig_sendEvent(self, _cmd, event);
                     return;
                 }
@@ -313,7 +314,7 @@ static void swizzled_makeKeyWindow(UIWindow *self, SEL _cmd) {
     if(self != floatingWindow && !learningMode) ensureFloatingOnTop();
 }
 
-// Toast
+// ========== Toast 提示 ==========
 static void showLoadedToast() {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 1.0*NSEC_PER_SEC), dispatch_get_main_queue(), ^{
         UIWindow *w = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
@@ -324,6 +325,21 @@ static void showLoadedToast() {
         }
         w.windowLevel=UIWindowLevelAlert+999; w.backgroundColor=[UIColor clearColor]; w.userInteractionEnabled=NO; w.hidden=NO;
         UILabel *l=[UILabel new]; l.text=@"✅ AdBlock 已加载"; l.textColor=[UIColor whiteColor]; l.backgroundColor=[[UIColor blackColor] colorWithAlphaComponent:0.7]; l.textAlignment=NSTextAlignmentCenter; l.font=[UIFont systemFontOfSize:16]; l.layer.cornerRadius=10; l.layer.masksToBounds=YES;
+        [l sizeToFit]; CGRect f=l.frame; f.size.width+=30; f.size.height+=16; l.frame=f; l.center=CGPointMake(w.bounds.size.width/2, w.bounds.size.height-100);
+        [w addSubview:l]; l.alpha=0; [UIView animateWithDuration:0.3 animations:^{ l.alpha=1; } completion:^(BOOL done){ [UIView animateWithDuration:0.3 delay:1.5 options:UIViewAnimationOptionCurveEaseOut animations:^{ l.alpha=0; } completion:^(BOOL done){ w.hidden=YES; }]; }];
+    });
+}
+
+static void showRuleSavedToast() {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIWindow *w = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
+        for (UIWindowScene *sc in [UIApplication sharedApplication].connectedScenes) {
+            if (sc.activationState == UISceneActivationStateForegroundActive) {
+                w.windowScene = sc; break;
+            }
+        }
+        w.windowLevel=UIWindowLevelAlert+999; w.backgroundColor=[UIColor clearColor]; w.userInteractionEnabled=NO; w.hidden=NO;
+        UILabel *l=[UILabel new]; l.text=@"✅ 规则已保存"; l.textColor=[UIColor whiteColor]; l.backgroundColor=[[UIColor blackColor] colorWithAlphaComponent:0.7]; l.textAlignment=NSTextAlignmentCenter; l.font=[UIFont systemFontOfSize:16]; l.layer.cornerRadius=10; l.layer.masksToBounds=YES;
         [l sizeToFit]; CGRect f=l.frame; f.size.width+=30; f.size.height+=16; l.frame=f; l.center=CGPointMake(w.bounds.size.width/2, w.bounds.size.height-100);
         [w addSubview:l]; l.alpha=0; [UIView animateWithDuration:0.3 animations:^{ l.alpha=1; } completion:^(BOOL done){ [UIView animateWithDuration:0.3 delay:1.5 options:UIViewAnimationOptionCurveEaseOut animations:^{ l.alpha=0; } completion:^(BOOL done){ w.hidden=YES; }]; }];
     });
